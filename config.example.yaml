@@ -1,0 +1,47 @@
+telegram:
+  api_id: 12345
+  api_hash: "REPLACE_ME"
+  bot_token: "REPLACE_ME"
+  owner_chat_id: 111222333
+
+openai:
+  api_key: "sk-REPLACE_ME"
+  default_writer_model: gpt-5.4-mini
+  default_researcher_model: gpt-5.4-mini
+  default_refiner_model: gpt-5.4-mini
+  default_setup_model: gpt-5.4-mini
+  embedding_model: text-embedding-3-small # used for duplicate/collision detection
+  flex_mode: false # set to true to use OpenAI flex service tier (lower cost, slower)
+
+researcher:
+  per_tick_fetch_budget: 8 # hard cap on fetch_url calls per channel tick
+  per_tick_check_budget: 3 # hard cap on check_relevance (collision-check) rounds per tick
+  temperature: null # researcher sampling temperature; raise (e.g. 0.8) to diversify
+  # queries across ticks. NOTE: leave null for OpenAI reasoning models (gpt-5.x with
+  # reasoning on) — they reject a non-default temperature.
+
+dedup:
+  similarity_threshold: 0.75 # cosine sim above which two posts are the same story
+  lookback_days: 14 # only compare against posts from the last N days
+  log_candidates: false # append every candidate + its top similarity scores to a JSONL file
+  candidate_log_path: data/dedup_candidates.jsonl # where those score logs go when enabled
+
+cost_control:
+  global_daily_usd: 1.50
+  per_channel_default_daily_usd: 0.50
+  on_threshold: pause # warn | downgrade | pause
+  downgrade_to: gpt-5.4-mini
+
+scheduling:
+  probabilistic_jitter_seconds: 1800
+
+storage:
+  db_path: data/news-bot.sqlite
+
+observability:
+  lmnr_enabled: false
+  lmnr_project_api_key: ""
+
+logging:
+  level: INFO
+

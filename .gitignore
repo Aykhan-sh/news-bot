@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Project secrets / data
+config.yaml
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+data/
+.env
+.env.*
+!.env.example
+
+# Personal docs / scratch files — kept out of main
+.saved_channel_*.yaml
+
+# Per-user channel configs (the repo ships an empty channels/ dir)
+channels/*.yaml
+
+# Telethon sessions
+*.session
+*.session-journal
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store

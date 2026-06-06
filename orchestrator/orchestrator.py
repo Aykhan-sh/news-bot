@@ -1,0 +1,363 @@
+from __future__ import annotations
+
+import logging
+import re
+from typing import Optional
+
+from pydantic_ai.settings import ModelSettings
+
+from agents.deps import ResearcherDeps, WriterDeps
+from agents.researcher import (
+    ResearcherOutput,
+    researcher_agent,
+)
+from agents.writer import WriterOutput, writer_agent
+from llm.cost import estimate_cost, usage_from_result
+from llm.models import ModelFactory
+from orchestrator.cost import CostController
+from orchestrator.dedup import DedupEngine, build_embed_text
+from orchestrator.models import AppConfig
+from orchestrator.prompt_builder import render
+from storage.repositories import (
+    ChannelRepo,
+    ChannelRow,
+    MessageRepo,
+    UsageRepo,
+)
+from telegram_client.client import InlineButton, TelegramBotClient
+
+log = logging.getLogger(__name__)
+
+
+def _md_escape(text: str) -> str:
+    """Escape Telegram Markdown V1 special chars: _ * ` [."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("`", "\\`")
+        .replace("[", "\\[")
+    )
+
+
+_MDV2_SPECIALS = "_*[]()~`>#+-=|{}.!\\"
+_MDV2_SPECIALS_SET = frozenset(_MDV2_SPECIALS)
+
+_MDV2_MARKUP_RE = re.compile(
+    r"\*[^*\n]+\*"                              # *bold*
+    r"|`[^`\n]+`"                               # `inline code`
+    r"|\[[^\]\n]+\]\(https?://[^)\s\n]+\)"      # [text](url)
+    r"|_[^_\n]+_"                               # _italic_
+)
+
+
+def _md_escape_v2(text: str) -> str:
+    """Escape every Telegram MarkdownV2 reserved char so literal text is safe."""
+    out = []
+    for ch in text:
+        if ch in _MDV2_SPECIALS_SET:
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+def _strip_control_chars(text: str) -> str:
+    """Remove non-printable control characters that break Telegram's parser.
+
+    Keeps normal whitespace (newline, carriage return, tab) and all printable
+    Unicode. Replaces other C0/C1 control chars with a space so words don't run
+    together.
+    """
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if cp in (0x0A, 0x0D, 0x09):
+            out.append(ch)
+        elif cp < 0x20 or cp == 0x7F or 0x80 <= cp <= 0x9F:
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _sanitize_mdv2_body(text: str) -> str:
+    """Ensure all literal MDv2 special chars are escaped while preserving intentional markup.
+
+    Splits the body into markup tokens (*bold*, `code`, [link](url), _italic_)
+    and literal segments. Literal segments are fully escaped; markup tokens
+    pass through untouched.
+    """
+    text = _strip_control_chars(text)
+    result: list[str] = []
+    last = 0
+    for m in _MDV2_MARKUP_RE.finditer(text):
+        for ch in text[last:m.start()]:
+            if ch in _MDV2_SPECIALS_SET:
+                result.append("\\")
+            result.append(ch)
+        result.append(m.group(0))
+        last = m.end()
+    for ch in text[last:]:
+        if ch in _MDV2_SPECIALS_SET:
+            result.append("\\")
+        result.append(ch)
+    return "".join(result)
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        tg: TelegramBotClient,
+        models: ModelFactory,
+        channels: ChannelRepo,
+        messages: MessageRepo,
+        usage: UsageRepo,
+        cost: CostController,
+        dedup: DedupEngine,
+    ) -> None:
+        self.cfg = cfg
+        self.tg = tg
+        self.models = models
+        self.channels = channels
+        self.messages = messages
+        self.usage = usage
+        self.cost = cost
+        self.dedup = dedup
+
+    async def fire_channel(self, channel_id: str, triggered_by: str = "scheduler") -> None:
+        channel = await self.channels.get(channel_id)
+        if channel is None or not channel.enabled:
+            log.info("Channel %s not active; skip", channel_id)
+            return
+
+        log.info("Firing channel %s (mode=%s, trigger=%s)", channel.id, channel.mode, triggered_by)
+
+        precheck = await self.cost.precheck(channel.id, channel.model_writer)
+        if not precheck.allowed:
+            log.warning("Skipping channel %s: %s", channel.id, precheck.reason)
+            await self._notify_owner(f"Skipped *{channel.display_name}*: {precheck.reason}")
+            return
+        writer_model = precheck.model_override or channel.model_writer
+        researcher_model = precheck.model_override or (channel.model_researcher or self.cfg.openai.default_researcher_model)
+
+        window = await self.dedup.sliding_window(channel.id, channel.dedup_window_n)
+
+        research_note: Optional[dict] = None
+        research_vector: Optional[list[float]] = None
+        if channel.mode == "sourced":
+            researcher_result = await self._run_researcher(channel, window, researcher_model)
+            if researcher_result is None:
+                await self._send_nothing_new(channel)
+                return
+            research_note, research_vector = researcher_result
+
+        await self._run_writer_and_send(channel, window, research_note, research_vector, writer_model)
+
+    # ------------------------------------------------------------------
+    # Researcher path
+    # ------------------------------------------------------------------
+
+    async def _run_researcher(
+        self,
+        channel: ChannelRow,
+        window,
+        researcher_model: str,
+    ) -> Optional[tuple[dict, Optional[list[float]]]]:
+        deps = ResearcherDeps(
+            channel=channel,
+            messages=self.messages,
+            dedup=self.dedup,
+            window=window,
+            fetch_budget=self.cfg.researcher.per_tick_fetch_budget,
+            check_budget=self.cfg.researcher.per_tick_check_budget,
+        )
+        model = self.models.get(researcher_model)
+        model_settings: Optional[ModelSettings] = None
+        if self.cfg.researcher.temperature is not None:
+            # Higher temperature diversifies the search queries across ticks so
+            # repeated firings don't keep surfacing the same colliding stories.
+            model_settings = ModelSettings(temperature=self.cfg.researcher.temperature)
+        user_prompt = render(
+            "shared/do_not_repeat.j2",
+            window=[
+                {
+                    "title": m.title,
+                    "keywords": m.keywords,
+                    "source_urls": m.source_urls,
+                    "created_at": m.created_at,
+                }
+                for m in window
+            ],
+        ) + "\n\nBegin."
+        try:
+            result = await researcher_agent.run(
+                user_prompt=user_prompt,
+                deps=deps,
+                model=model,
+                model_settings=model_settings,
+            )
+        except Exception as e:
+            log.exception("Researcher failed for %s: %s", channel.id, e)
+            return None
+
+        await self._record_usage(channel.id, "researcher", researcher_model, result)
+
+        out: ResearcherOutput = result.output
+        if out.picked_id is None:
+            log.info("Researcher returned nothing for %s", channel.id)
+            return None
+
+        # The pick is the id of a source the researcher fetched this tick. The full
+        # record (url, title, published_at, text) is the writer's research note.
+        # We trust check_relevance for freshness/dedup — no extra post-pick gate.
+        candidate = deps.fetched.get(out.picked_id)
+        if candidate is None:
+            log.warning(
+                "Researcher picked id %s for %s but it was never fetched (have: %s); skipping",
+                out.picked_id,
+                channel.id,
+                list(deps.fetched.keys()),
+            )
+            return None
+        log.info(
+            "Researcher picked %s (%s) for %s",
+            out.picked_id,
+            out.picked_title or "?",
+            channel.id,
+        )
+        picked_vector = deps.fetched_vectors.get(out.picked_id)
+        return candidate.to_dict(), picked_vector
+
+    async def _send_nothing_new(self, channel: ChannelRow) -> None:
+        text = f"{_md_escape(channel.hashtag)}\n\n_Nothing new today._"
+        await self.tg.send_message(text)
+
+    # ------------------------------------------------------------------
+    # Writer path + dedup retry
+    # ------------------------------------------------------------------
+
+    async def _run_writer_and_send(
+        self,
+        channel: ChannelRow,
+        window,
+        research_note: Optional[dict],
+        research_vector: Optional[list[float]],
+        writer_model: str,
+    ) -> None:
+        deps = WriterDeps(
+            channel=channel,
+            window=window,
+            research_note=research_note,
+            fetch_budget=self.cfg.researcher.per_tick_fetch_budget,
+        )
+        model = self.models.get(writer_model)
+
+        # Dedup is the researcher's job (it picks a non-colliding source from a
+        # whole shortlist). The writer only has the one chosen source, so re-checking
+        # here can only fail — it just writes the post.
+        try:
+            result = await writer_agent.run(
+                user_prompt="Write the next post for this channel.", deps=deps, model=model
+            )
+        except Exception as e:
+            log.exception("Writer failed for %s: %s", channel.id, e)
+            return
+        await self._record_usage(channel.id, "writer", writer_model, result)
+        draft = result.output
+
+        body_text = self._format_telegram_body(channel, draft)
+        buttons = self._buttons_for_draft(channel, draft)
+        tg_msg_id = await self.tg.send_message(body_text, buttons=buttons, parse_mode="MarkdownV2")
+
+        usage_tin = 0
+        usage_tout = 0
+        cost = 0.0  # Cost is in usage_ledger already; messages_sent aggregates roughly.
+        msg_id = await self.messages.insert(
+            channel_id=channel.id,
+            title=draft.title,
+            body=draft.body,
+            hashtags=draft.hashtags,
+            keywords=draft.keywords,
+            source_urls=draft.sources_used,
+            telegram_message_id=tg_msg_id,
+            tokens_in=usage_tin,
+            tokens_out=usage_tout,
+            cost_usd=cost,
+        )
+
+        # Store the post's embedding so future ticks can dedup against it.
+        # Prefer the researcher's pre-computed candidate vector (already used for
+        # collision checking) so the stored signal matches what was actually compared.
+        # Fall back to embedding the fetched source text when check_relevance did not
+        # store a vector (e.g. parallel tool-call race with final_result). Only use
+        # the writer's output as a last resort for unsourced channels.
+        try:
+            if research_vector is not None:
+                vector = research_vector
+            elif research_note is not None:
+                vector = await self.dedup.embedder.embed(
+                    build_embed_text(
+                        research_note.get("title") or draft.title,
+                        None,
+                        research_note.get("text") or None,
+                    )
+                )
+            else:
+                vector = await self.dedup.embedder.embed(
+                    build_embed_text(draft.title, draft.keywords, draft.body)
+                )
+            await self.messages.save_embedding(
+                msg_id, channel.id, self.dedup.embedder.model, vector
+            )
+        except Exception as e:
+            log.warning("Failed to store embedding for msg %s: %s", msg_id, e)
+
+        # Re-render buttons now that we have a DB message id (so callback payloads can reference it).
+        if tg_msg_id is not None:
+            buttons_final = self._buttons_for_draft(channel, draft, db_message_id=msg_id)
+            try:
+                await self.tg.edit_reply_markup(tg_msg_id, buttons=buttons_final)
+            except Exception:
+                pass
+
+    def _format_telegram_body(self, channel: ChannelRow, draft: WriterOutput) -> str:
+        plain_title = re.sub(r"\\([_*\[\]()~`>#+\-=|{}.!])", r"\1", draft.title)
+        safe_body = _sanitize_mdv2_body(draft.body)
+        seen: set[str] = set()
+        deduped_hashtags: list[str] = []
+        for t in [channel.hashtag] + list(draft.hashtags):
+            key = t.lstrip("#").lower()
+            if key not in seen:
+                seen.add(key)
+                deduped_hashtags.append(t)
+        hashtag_line = " ".join(
+            _md_escape_v2(t if t.startswith("#") else f"#{t.lstrip('#')}")
+            for t in deduped_hashtags
+        )
+        return f"*{_md_escape_v2(plain_title)}*\n\n{safe_body}\n\n{hashtag_line}"
+
+    def _buttons_for_draft(
+        self,
+        channel: ChannelRow,
+        draft: WriterOutput,
+        db_message_id: Optional[int] = None,
+    ) -> list[InlineButton]:
+        buttons: list[InlineButton] = []
+        mid_part = str(db_message_id) if db_message_id is not None else "0"
+        if draft.sources_used:
+            buttons.append(InlineButton(text="🔗 Sources", callback_data=f"sources:{mid_part}"))
+        buttons.append(InlineButton(text="✏️ Feedback", callback_data=f"feedback:{channel.id}:{mid_part}"))
+        buttons.append(InlineButton(text="💬 Ask", callback_data=f"ask:{channel.id}:{mid_part}"))
+        return buttons
+
+    async def _notify_owner(self, text: str) -> None:
+        try:
+            await self.tg.send_message(text)
+        except Exception:
+            pass
+
+    async def _record_usage(self, channel_id: Optional[str], agent_name: str, model: str, result) -> None:
+        tin, tout = usage_from_result(result)
+        cost = estimate_cost(model, tin, tout)
+        await self.usage.insert(channel_id, agent_name, model, tin, tout, cost)

@@ -1,0 +1,19 @@
+services:
+  news-bot:
+    build: .
+    container_name: news-bot
+    restart: unless-stopped
+    stop_grace_period: 20s
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./channels:/app/channels
+      - ./prompts:/app/prompts:ro
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Baku
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

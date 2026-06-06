@@ -1,0 +1,17 @@
+{% if window and window|length > 0 -%}
+# Do-not-repeat
+
+You have RECENTLY covered the following items. **Do not repeat any of them.**
+Pick something genuinely different — different topic, different angle, different example.
+
+Recently covered (most recent first):
+
+{% for w in window %}
+{{ loop.index }}. "{{ w.title }}"{% if w.keywords %}
+   keywords: {{ w.keywords }}{% endif %}{% if w.source_urls is defined and w.source_urls %}
+   urls: {{ w.source_urls }}{% endif %}
+
+{% endfor %}
+{%- else -%}
+No recent items on record for this channel.
+{%- endif %}
