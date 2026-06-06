@@ -81,7 +81,7 @@ On first run the bot:
 - starts APScheduler and Telegram long-polling.
 
 Send `/start` to your bot in Telegram to confirm it is alive — you should get
-the welcome message back. Then `/addchannel` to set up your first feed.
+the welcome message back. Then `/create_channel` to set up your first feed.
 
 ### 2.2 Docker
 
@@ -116,12 +116,17 @@ openai:
   default_refiner_model: gpt-5.4-mini
   default_setup_model: gpt-5.4-mini
   embedding_model: text-embedding-3-small   # used for duplicate/collision detection
+  flex_mode: false               # use OpenAI flex service tier (lower cost, slower)
 
 researcher:
-  per_tick_fetch_budget: 5       # hard cap on fetch_url calls per channel tick
+  per_tick_fetch_budget: 8       # hard cap on fetch_url calls per channel tick
                                  # (web search itself is run by the LLM provider
                                  # via WebSearchTool — billed per-call by OpenAI,
                                  # capped indirectly by cost_control below)
+  per_tick_check_budget: 3       # hard cap on check_relevance (collision-check) rounds per tick
+  temperature: null              # researcher sampling temperature; raise (e.g. 0.8) to
+                                 # diversify queries. Leave null for OpenAI reasoning
+                                 # models (gpt-5.x) — they reject a non-default temperature.
 
 dedup:
   similarity_threshold: 0.75     # cosine sim above which two posts are the same story
@@ -160,7 +165,7 @@ Every channel lands in the same Telegram chat with you, tagged by its hashtag.
 
 The repo ships with an **empty `./channels/` directory** so you start from a
 clean slate. The recommended way to add your first channel is to send
-`/addchannel` to the bot once it's running and describe — in your own words —
+`/create_channel` to the bot once it's running and describe — in your own words —
 what you want to read and how often. The Setup Agent will draft the
 YAML, show it to you, let you iterate, and save it on approval.
 
@@ -212,7 +217,7 @@ images:
 
 Two ways:
 
-**A. From Telegram (recommended).** Send `/addchannel` to the bot, describe
+**A. From Telegram (recommended).** Send `/create_channel` to the bot, describe
 what you want in natural language (topic, frequency, tone, things to skip),
 and the Setup Agent drafts a channel YAML for you. You can iterate
 ("more technical", "twice a day instead of daily", "no funding rounds")
@@ -262,13 +267,13 @@ Send these to your bot in Telegram:
 | Command | What it does |
 |---|---|
 | `/start` | Welcome message + overview of what the bot does. |
-| `/addchannel` | Guided setup — describe a channel and the bot drafts the YAML. |
+| `/create_channel` | Guided setup — describe a channel and the bot drafts the YAML. (alias: `/addchannel`) |
 | `/change_channel [channel_id]` | Edit an existing channel's prompt/schedule via the same guided flow. No arg → picker. |
 | `/channels` | List all channels with id, mode, enabled state + action buttons. |
 | `/now [channel_id]` | Fire that channel right now (bypasses schedule). No arg → picker. |
 | `/pause [channel_id]` | Stop scheduling that channel (in-DB toggle). No arg → picker. |
 | `/resume [channel_id]` | Re-enable a paused channel. No arg → picker. |
-| `/delchannel [channel_id]` | Permanently delete a channel. No arg → picker. |
+| `/del_channel [channel_id]` | Permanently delete a channel. No arg → picker. (alias: `/delchannel`) |
 | `/usage` | Per-agent / per-channel token + USD spend in the last 24h. |
 | `/cancel` | Abort an in-progress onboarding flow. |
 | `/help` | List of commands. |
@@ -276,7 +281,7 @@ Send these to your bot in Telegram:
 Example:
 
 ```
-/addchannel
+/create_channel
 /now ai_news
 /pause kazakh
 /usage
