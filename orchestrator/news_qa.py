@@ -10,6 +10,7 @@ from agents.news_qa import news_qa_agent, render_system_prompt
 from llm.cost import estimate_cost, usage_from_result
 from llm.models import ModelFactory
 from orchestrator.models import AppConfig
+from orchestrator.orchestrator import md_to_html
 from storage.repositories import ChannelRepo, MessageRepo, UsageRepo
 from telegram_client.client import InlineButton, TelegramBotClient
 
@@ -56,7 +57,7 @@ class NewsQAFlow:
             awaiting_question=True,
         )
         await self.tg.send_message(
-            f"Ask anything about that post from *{channel_id}*. Reply here with your question.",
+            f"Ask anything about that post from <b>{channel_id}</b>. Reply here with your question.",
             force_reply=True,
         )
 
@@ -99,7 +100,7 @@ class NewsQAFlow:
             )
         except Exception as e:
             log.exception("News QA failed: %s", e)
-            await self.tg.send_message(f"Sorry, couldn't answer: `{e}`")
+            await self.tg.send_message(f"Sorry, couldn't answer: <code>{e}</code>")
             self.state.awaiting_question = True
             return True
 
@@ -112,7 +113,7 @@ class NewsQAFlow:
         self.state.history.append({"role": "assistant", "text": answer})
 
         await self.tg.send_message(
-            answer,
+            md_to_html(answer),
             buttons=[
                 InlineButton("💬 Ask again", f"ask:{channel_id}:{db_message_id}"),
                 InlineButton("✅ Done", "ask:done"),
@@ -122,4 +123,4 @@ class NewsQAFlow:
 
     async def on_done(self) -> None:
         self.state = QAState()
-        await self.tg.send_message("_Closed the Q&A._")
+        await self.tg.send_message("<i>Closed the Q&amp;A.</i>")

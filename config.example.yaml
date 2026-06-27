@@ -32,9 +32,6 @@ cost_control:
   on_threshold: pause # warn | downgrade | pause
   downgrade_to: gpt-5.4-mini
 
-scheduling:
-  probabilistic_jitter_seconds: 1800
-
 storage:
   db_path: data/news-bot.sqlite
 

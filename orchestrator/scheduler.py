@@ -23,12 +23,10 @@ class ChannelScheduler:
         self,
         channels: ChannelRepo,
         fire_callback: Callable[[str, str], Awaitable[None]],
-        probabilistic_jitter_seconds: int = 1800,
     ) -> None:
         self.channels = channels
         self.fire = fire_callback
         self.sched = AsyncIOScheduler()
-        self.jitter = probabilistic_jitter_seconds
 
     def start(self) -> None:
         self.sched.start()
@@ -98,8 +96,6 @@ class ChannelScheduler:
         for i in range(times):
             mins = random.randint(start_h * 60, max(start_h * 60 + 1, end_h * 60))
             hour, minute = divmod(mins, 60)
-            jitter = random.randint(-self.jitter, self.jitter) // 60
-            minute = max(0, min(59, minute + jitter))
             trig_kwargs: dict = {"hour": hour, "minute": minute}
             if tz:
                 trig_kwargs["timezone"] = tz

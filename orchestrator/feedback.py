@@ -15,7 +15,7 @@ from agents.prompt_refiner import (
 from llm.cost import estimate_cost, usage_from_result
 from llm.models import ModelFactory
 from orchestrator.models import AppConfig
-from orchestrator.orchestrator import _md_escape
+from orchestrator.orchestrator import _html_escape, md_to_html
 from storage.repositories import (
     ChannelRepo,
     MessageRepo,
@@ -65,7 +65,7 @@ class FeedbackFlow:
         await self.sessions.open(session_id, channel_id, db_message_id)
         self.state.awaiting_feedback_for = (channel_id, db_message_id, session_id)
         await self.tg.send_message(
-            f"What should I change for *{channel_id}*? Reply to this message.",
+            f"What should I change for <b>{_html_escape(channel_id)}</b>? Reply to this message.",
             force_reply=True,
         )
 
@@ -91,7 +91,7 @@ class FeedbackFlow:
         if proposed_freshness is not None:
             await self.channels.set_freshness_days(channel_id, proposed_freshness)
             extra_lines.append(
-                f"_Freshness:_ now only items published in the last "
+                f"<i>Freshness:</i> now only items published in the last "
                 f"{proposed_freshness} day(s)"
             )
 
@@ -102,23 +102,23 @@ class FeedbackFlow:
                 channel_id, row["proposed_schedule_kind"], spec
             )
             extra_lines.append(
-                f"_Schedule:_ now `{row['proposed_schedule_kind']} {spec}`"
+                f"<i>Schedule:</i> now <code>{row['proposed_schedule_kind']} {spec}</code>"
             )
 
         if row["proposed_format"] is not None:
             new_format = row["proposed_format"] or None
             await self.channels.set_format(channel_id, new_format)
             extra_lines.append(
-                "_Format:_ reset to default"
+                "<i>Format:</i> reset to default"
                 if new_format is None
-                else "_Format:_ updated"
+                else "<i>Format:</i> updated"
             )
 
         if row["proposed_research_prompt"] is not None:
             await self.channels.set_research_prompt(
                 channel_id, row["proposed_research_prompt"]
             )
-            extra_lines.append("_Research brief:_ updated")
+            extra_lines.append("<i>Research brief:</i> updated")
 
         await self.pending.resolve(pending_id, "approved")
         await self.sessions.close(row["session_id"], "approved")
@@ -127,7 +127,7 @@ class FeedbackFlow:
 
         tail = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
         await self.tg.send_message(
-            f"Saved changes for *{channel_id}* ✅\n_{row['change_summary']}_{tail}"
+            f"Saved changes for <b>{_html_escape(channel_id)}</b> ✅\n<i>{md_to_html(row['change_summary'])}</i>{tail}"
         )
 
     async def on_cancel(self, pending_id: int) -> None:
@@ -160,7 +160,7 @@ class FeedbackFlow:
     ) -> None:
         channel = await self.channels.get(channel_id)
         if channel is None:
-            await self.tg.send_message(f"Channel `{channel_id}` not found.")
+            await self.tg.send_message(f"Channel <code>{_html_escape(channel_id)}</code> not found.")
             return
 
         triggered_message = None
@@ -252,29 +252,29 @@ class FeedbackFlow:
         change_lines = ""
         if proposed_freshness is not None:
             change_lines += (
-                f"_Freshness:_ only items published in the last "
+                f"<i>Freshness:</i> only items published in the last "
                 f"{proposed_freshness} day(s)\n"
             )
         if deps.schedule_changed:
             change_lines += (
-                f"_Schedule:_ `{proposed_schedule_kind} {proposed_schedule_spec}`\n"
+                f"<i>Schedule:</i> <code>{proposed_schedule_kind} {proposed_schedule_spec}</code>\n"
             )
         if deps.format_changed:
             change_lines += (
-                "_Format:_ reset to default\n"
+                "<i>Format:</i> reset to default\n"
                 if not proposed_format
-                else f"_Format:_\n```\n{proposed_format}\n```\n"
+                else f"<i>Format:</i>\n<pre>{_html_escape(proposed_format)}</pre>\n"
             )
         if proposed_research_prompt is not None:
             change_lines += (
-                f"_Research brief:_\n```\n{proposed_research_prompt}\n```\n"
+                f"<i>Research brief:</i>\n<pre>{_html_escape(proposed_research_prompt)}</pre>\n"
             )
 
         await self.tg.send_message(
-            f"*Proposed changes for {_md_escape(channel.display_name)}*\n"
-            f"_Change:_ {_md_escape(out.change_summary)}\n"
+            f"<b>Proposed changes for {_html_escape(channel.display_name)}</b>\n"
+            f"<i>Change:</i> {md_to_html(out.change_summary)}\n"
             f"{change_lines}\n"
-            f"*Prompt:*\n```\n{proposed_prompt}\n```",
+            f"<b>Prompt:</b>\n<pre>{_html_escape(proposed_prompt)}</pre>",
             buttons=[
                 InlineButton("✅ Approve", callback_data=f"prompt:approve:{pending_id}"),
                 InlineButton("✏️ More feedback", callback_data=f"prompt:more:{pending_id}"),

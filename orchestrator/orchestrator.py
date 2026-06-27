@@ -29,36 +29,9 @@ from telegram_client.client import InlineButton, TelegramBotClient
 log = logging.getLogger(__name__)
 
 
-def _md_escape(text: str) -> str:
-    """Escape Telegram Markdown V1 special chars: _ * ` [."""
-    return (
-        text.replace("\\", "\\\\")
-        .replace("_", "\\_")
-        .replace("*", "\\*")
-        .replace("`", "\\`")
-        .replace("[", "\\[")
-    )
-
-
-_MDV2_SPECIALS = "_*[]()~`>#+-=|{}.!\\"
-_MDV2_SPECIALS_SET = frozenset(_MDV2_SPECIALS)
-
-_MDV2_MARKUP_RE = re.compile(
-    r"\*[^*\n]+\*"                              # *bold*
-    r"|`[^`\n]+`"                               # `inline code`
-    r"|\[[^\]\n]+\]\(https?://[^)\s\n]+\)"      # [text](url)
-    r"|_[^_\n]+_"                               # _italic_
-)
-
-
-def _md_escape_v2(text: str) -> str:
-    """Escape every Telegram MarkdownV2 reserved char so literal text is safe."""
-    out = []
-    for ch in text:
-        if ch in _MDV2_SPECIALS_SET:
-            out.append("\\")
-        out.append(ch)
-    return "".join(out)
+def _html_escape(text: str) -> str:
+    """Escape HTML special characters (& < >) for safe inclusion in Telegram HTML."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _strip_control_chars(text: str) -> str:
@@ -80,27 +53,43 @@ def _strip_control_chars(text: str) -> str:
     return "".join(out)
 
 
-def _sanitize_mdv2_body(text: str) -> str:
-    """Ensure all literal MDv2 special chars are escaped while preserving intentional markup.
+_MD_HTML_RE = re.compile(
+    r"```([\s\S]+?)```"                          # ```code block```
+    r"|\*\*([^*\n]+)\*\*"                        # **bold**
+    r"|`([^`\n]+)`"                              # `inline code`
+    r"|\[([^\]\n]+)\]\((https?://[^)\s\n]+)\)"  # [label](url)
+    r"|(?<!\w)\*([^*\n]+)\*(?!\w)"               # *italic* (not inside a word)
+    r"|(?<!\w)_([^_\n]+)_(?!\w)"                 # _italic_ (not inside a word)
+)
 
-    Splits the body into markup tokens (*bold*, `code`, [link](url), _italic_)
-    and literal segments. Literal segments are fully escaped; markup tokens
-    pass through untouched.
+
+def md_to_html(text: str) -> str:
+    """Convert simple Markdown to Telegram HTML.
+
+    Recognises **bold**, *italic*, _italic_, `code`, ```code block```,
+    and [label](url). All other text is HTML-escaped so it displays literally.
     """
     text = _strip_control_chars(text)
     result: list[str] = []
     last = 0
-    for m in _MDV2_MARKUP_RE.finditer(text):
-        for ch in text[last:m.start()]:
-            if ch in _MDV2_SPECIALS_SET:
-                result.append("\\")
-            result.append(ch)
-        result.append(m.group(0))
+    for m in _MD_HTML_RE.finditer(text):
+        result.append(_html_escape(text[last:m.start()]))
+        if m.group(1) is not None:
+            result.append(f"<pre>{_html_escape(m.group(1).strip())}</pre>")
+        elif m.group(2) is not None:
+            result.append(f"<b>{_html_escape(m.group(2))}</b>")
+        elif m.group(3) is not None:
+            result.append(f"<code>{_html_escape(m.group(3))}</code>")
+        elif m.group(4) is not None:
+            label = _html_escape(m.group(4))
+            url = m.group(5).replace("&", "&amp;")
+            result.append(f'<a href="{url}">{label}</a>')
+        elif m.group(6) is not None:
+            result.append(f"<i>{_html_escape(m.group(6))}</i>")
+        elif m.group(7) is not None:
+            result.append(f"<i>{_html_escape(m.group(7))}</i>")
         last = m.end()
-    for ch in text[last:]:
-        if ch in _MDV2_SPECIALS_SET:
-            result.append("\\")
-        result.append(ch)
+    result.append(_html_escape(text[last:]))
     return "".join(result)
 
 
@@ -136,7 +125,7 @@ class Orchestrator:
         precheck = await self.cost.precheck(channel.id, channel.model_writer)
         if not precheck.allowed:
             log.warning("Skipping channel %s: %s", channel.id, precheck.reason)
-            await self._notify_owner(f"Skipped *{channel.display_name}*: {precheck.reason}")
+            await self._notify_owner(f"Skipped <b>{_html_escape(channel.display_name)}</b>: {_html_escape(precheck.reason)}")
             return
         writer_model = precheck.model_override or channel.model_writer
         researcher_model = precheck.model_override or (channel.model_researcher or self.cfg.openai.default_researcher_model)
@@ -230,7 +219,7 @@ class Orchestrator:
         return candidate.to_dict(), picked_vector
 
     async def _send_nothing_new(self, channel: ChannelRow) -> None:
-        text = f"{_md_escape(channel.hashtag)}\n\n_Nothing new today._"
+        text = f"{_html_escape(channel.hashtag)}\n\n<i>Nothing new today.</i>"
         await self.tg.send_message(text)
 
     # ------------------------------------------------------------------
@@ -268,7 +257,7 @@ class Orchestrator:
 
         body_text = self._format_telegram_body(channel, draft)
         buttons = self._buttons_for_draft(channel, draft)
-        tg_msg_id = await self.tg.send_message(body_text, buttons=buttons, parse_mode="MarkdownV2")
+        tg_msg_id = await self.tg.send_message(body_text, buttons=buttons, parse_mode="HTML")
 
         usage_tin = 0
         usage_tout = 0
@@ -323,7 +312,7 @@ class Orchestrator:
 
     def _format_telegram_body(self, channel: ChannelRow, draft: WriterOutput) -> str:
         plain_title = re.sub(r"\\([_*\[\]()~`>#+\-=|{}.!])", r"\1", draft.title)
-        safe_body = _sanitize_mdv2_body(draft.body)
+        safe_body = md_to_html(draft.body)
         seen: set[str] = set()
         deduped_hashtags: list[str] = []
         for t in [channel.hashtag] + list(draft.hashtags):
@@ -332,10 +321,16 @@ class Orchestrator:
                 seen.add(key)
                 deduped_hashtags.append(t)
         hashtag_line = " ".join(
-            _md_escape_v2(t if t.startswith("#") else f"#{t.lstrip('#')}")
+            _html_escape(t if t.startswith("#") else f"#{t.lstrip('#')}")
             for t in deduped_hashtags
         )
-        return f"*{_md_escape_v2(plain_title)}*\n\n{safe_body}\n\n{hashtag_line}"
+        parts = [f"<b>{_html_escape(plain_title)}</b>\n\n{safe_body}\n\n{hashtag_line}"]
+        if draft.sources_used:
+            src_lines = [
+                f"{i+1}. {_html_escape(u)}" for i, u in enumerate(draft.sources_used)
+            ]
+            parts.append("\n\nsources:\n" + "\n".join(src_lines))
+        return "".join(parts)
 
     def _buttons_for_draft(
         self,
@@ -345,8 +340,6 @@ class Orchestrator:
     ) -> list[InlineButton]:
         buttons: list[InlineButton] = []
         mid_part = str(db_message_id) if db_message_id is not None else "0"
-        if draft.sources_used:
-            buttons.append(InlineButton(text="🔗 Sources", callback_data=f"sources:{mid_part}"))
         buttons.append(InlineButton(text="✏️ Feedback", callback_data=f"feedback:{channel.id}:{mid_part}"))
         buttons.append(InlineButton(text="💬 Ask", callback_data=f"ask:{channel.id}:{mid_part}"))
         return buttons

@@ -15,7 +15,7 @@ from orchestrator.feedback import FeedbackFlow
 from orchestrator.models import AppConfig, load_channels_dir, load_config
 from orchestrator.news_qa import NewsQAFlow
 from orchestrator.onboarding import OnboardingFlow
-from orchestrator.orchestrator import Orchestrator
+from orchestrator.orchestrator import Orchestrator, _html_escape
 from orchestrator.scheduler import ChannelScheduler
 from storage.db import init_db
 from storage.repositories import (
@@ -136,7 +136,6 @@ class App:
         self.scheduler = ChannelScheduler(
             channels=self.channel_repo,
             fire_callback=self._fire,
-            probabilistic_jitter_seconds=self.cfg.scheduling.probabilistic_jitter_seconds,
         )
         await self.scheduler.schedule_all()
         self.scheduler.start()
@@ -204,9 +203,6 @@ class App:
                 await self.onboarding.on_more_feedback()
             elif data == "setup:cancel":
                 await self.onboarding.cancel()
-            elif data.startswith("sources:"):
-                msg_id = int(data.split(":", 1)[1])
-                await self._show_sources(msg_id)
             elif data.startswith("feedback:"):
                 _, channel_id, mid = data.split(":", 2)
                 await self.feedback.on_feedback_button(channel_id, int(mid))
@@ -218,7 +214,7 @@ class App:
                 await self.feedback.on_more_feedback(int(data.split(":", 2)[2]))
             elif data.startswith("now:"):
                 channel_id = data.split(":", 1)[1]
-                await self.tg.send_message(f"Firing `{channel_id}`…")
+                await self.tg.send_message(f"Firing <code>{_html_escape(channel_id)}</code>…")
                 await self.orchestrator.fire_channel(channel_id, triggered_by="/now")
             elif data.startswith("del:confirm:"):
                 channel_id = data.split(":", 2)[2]
@@ -230,13 +226,13 @@ class App:
                 await self.channel_repo.set_enabled(channel_id, False)
                 if self.scheduler:
                     self.scheduler.unschedule_channel(channel_id)
-                await self.tg.send_message(f"Paused `{channel_id}`")
+                await self.tg.send_message(f"Paused <code>{_html_escape(channel_id)}</code>")
             elif data.startswith("resume:"):
                 channel_id = data.split(":", 1)[1]
                 await self.channel_repo.set_enabled(channel_id, True)
                 if self.scheduler:
                     await self.scheduler.schedule_channel(channel_id)
-                await self.tg.send_message(f"Resumed `{channel_id}`")
+                await self.tg.send_message(f"Resumed <code>{_html_escape(channel_id)}</code>")
             elif data.startswith("edit:"):
                 channel_id = data.split(":", 1)[1]
                 locale_hint = (cq.get("from") or {}).get("language_code")
@@ -253,15 +249,6 @@ class App:
         finally:
             await self.tg.answer_callback_query(cq_id)
 
-    async def _show_sources(self, db_message_id: int) -> None:
-        assert self.message_repo is not None
-        msg = await self.message_repo.get(db_message_id)
-        if msg is None or not msg.source_urls:
-            await self.tg.send_message("_No sources recorded for that message._")
-            return
-        lines = [f"{i+1}. {u}" for i, u in enumerate(msg.source_urls)]
-        await self.tg.send_message("*Sources:*\n" + "\n".join(lines))
-
     async def _handle_command(self, text: str, locale_hint: str | None = None) -> None:
         assert self.orchestrator is not None and self.channel_repo is not None
         assert self.onboarding is not None
@@ -275,7 +262,7 @@ class App:
             if self.onboarding.is_active():
                 await self.onboarding.cancel()
             else:
-                await self.tg.send_message("_Nothing to cancel._")
+                await self.tg.send_message("<i>Nothing to cancel.</i>")
         elif cmd == "/now":
             if args:
                 await self.orchestrator.fire_channel(args[0], triggered_by="/now")
@@ -288,7 +275,7 @@ class App:
                 await self.channel_repo.set_enabled(args[0], False)
                 if self.scheduler:
                     self.scheduler.unschedule_channel(args[0])
-                await self.tg.send_message(f"Paused `{args[0]}`")
+                await self.tg.send_message(f"Paused <code>{_html_escape(args[0])}</code>")
             else:
                 await self._send_channel_picker("pause", "Pick a channel to pause:")
         elif cmd == "/resume":
@@ -296,7 +283,7 @@ class App:
                 await self.channel_repo.set_enabled(args[0], True)
                 if self.scheduler:
                     await self.scheduler.schedule_channel(args[0])
-                await self.tg.send_message(f"Resumed `{args[0]}`")
+                await self.tg.send_message(f"Resumed <code>{_html_escape(args[0])}</code>")
             else:
                 await self._send_channel_picker("resume", "Pick a channel to resume:")
         elif cmd in ("/del_channel", "/delchannel"):
@@ -317,10 +304,10 @@ class App:
             usage_repo = UsageRepo(self.message_repo.db)  # type: ignore[attr-defined]
             rows = await usage_repo.today_breakdown()
             if not rows:
-                await self.tg.send_message("_No usage in the last 24h._")
+                await self.tg.send_message("<i>No usage in the last 24h.</i>")
                 return
             lines = [
-                f"`{r['channel_id'] or 'system'}` · {r['agent']} · {r['model']} · "
+                f"<code>{_html_escape(r['channel_id'] or 'system')}</code> · {_html_escape(r['agent'])} · {_html_escape(r['model'])} · "
                 f"in={r['tin']} out={r['tout']} ${r['cost']:.4f}"
                 for r in rows
             ]
@@ -328,37 +315,37 @@ class App:
         elif cmd == "/help":
             await self._send_help()
         else:
-            await self.tg.send_message(f"Unknown command: `{cmd}`. Try /help.")
+            await self.tg.send_message(f"Unknown command: <code>{_html_escape(cmd)}</code>. Try /help.")
 
     async def _send_welcome(self) -> None:
         await self.tg.send_message(
-            "*Your personal news bot* 📰\n\n"
+            "<b>Your personal news bot</b> 📰\n\n"
             "I'm a private news assistant. You tell me what topics you care about — "
             "AI, geopolitics, your favourite football club, a niche research area — "
             "and I quietly research the web on a schedule and drop short, "
             "well-sourced briefings right here in this chat.\n\n"
-            "Every news post comes with a *🔗 Sources* button so you can verify "
-            "anything I claim, and a *✏️ Feedback* button so you can tell me "
-            '_"shorter"_, _"more technical"_, _"skip funding rounds"_ — and I\'ll '
+            "Every news post ends with a <b>sources</b> list so you can verify "
+            "anything I claim, and a <b>✏️ Feedback</b> button so you can tell me "
+            '<i>"shorter"</i>, <i>"more technical"</i>, <i>"skip funding rounds"</i> — and I\'ll '
             "rewrite the channel's prompt for you.\n\n"
-            "*Not just news.* The same engine works for any recurring drip you'd "
-            "like: a *Kazakh word a day*, a *daily interesting fact*, a *math "
-            "concept of the morning*, an *English idiom*, a *historical event on "
-            "this date*. If it can be described, it can be scheduled.\n\n"
-            "*Commands*\n"
-            "• /create_channel — set up a new feed by *describing* what you want\n"
+            "<b>Not just news.</b> The same engine works for any recurring drip you'd "
+            "like: a <b>Kazakh word a day</b>, a <b>daily interesting fact</b>, a <b>math "
+            "concept of the morning</b>, an <b>English idiom</b>, a <b>historical event on "
+            "this date</b>. If it can be described, it can be scheduled.\n\n"
+            "<b>Commands</b>\n"
+            "• /create_channel — set up a new feed by <b>describing</b> what you want\n"
             "• /channels — list your channels (pause / fire / delete buttons)\n"
             "• /now — fire a channel right now\n"
             "• /pause, /resume, /del_channel — manage a channel\n"
             "• /usage — last 24h spend\n"
             "• /help — show this again\n\n"
-            "*Get started:* tap /create_channel and describe — in your own words — "
+            "<b>Get started:</b> tap /create_channel and describe — in your own words — "
             "what you want to read, how often, and any style notes."
         )
 
     async def _send_help(self) -> None:
         await self.tg.send_message(
-            "*Commands*\n"
+            "<b>Commands</b>\n"
             "/start — welcome + overview\n"
             "/create_channel — guided setup; just describe what you want\n"
             "/change_channel [channel] — change schedule/prompt of an existing channel (no arg → picker)\n"
@@ -414,10 +401,10 @@ class App:
         assert self.channel_repo is not None
         chs = await self.channel_repo.list_all()
         if not chs:
-            await self.tg.send_message("_No channels configured. Use /create_channel._")
+            await self.tg.send_message("<i>No channels configured. Use /create_channel.</i>")
             return
         lines = [
-            f"`{c.id}` — {c.display_name} ({c.mode}) {'🟢' if c.enabled else '🔴'}"
+            f"<code>{_html_escape(c.id)}</code> — {_html_escape(c.display_name)} ({_html_escape(c.mode)}) {'🟢' if c.enabled else '🔴'}"
             for c in chs
         ]
         await self.tg.send_message("Channels:\n" + "\n".join(lines))
@@ -426,7 +413,7 @@ class App:
         assert self.channel_repo is not None
         chs = await self.channel_repo.list_all()
         if not chs:
-            await self.tg.send_message("_No channels configured._")
+            await self.tg.send_message("<i>No channels configured.</i>")
             return
         buttons = [
             InlineButton(
@@ -441,10 +428,10 @@ class App:
         assert self.channel_repo is not None
         ch = await self.channel_repo.get(channel_id)
         if ch is None:
-            await self.tg.send_message(f"Channel `{channel_id}` not found.")
+            await self.tg.send_message(f"Channel <code>{_html_escape(channel_id)}</code> not found.")
             return
         await self.tg.send_message(
-            f"Delete *{ch.display_name}* (`{ch.id}`) permanently?",
+            f"Delete <b>{_html_escape(ch.display_name)}</b> (<code>{_html_escape(ch.id)}</code>) permanently?",
             buttons=[
                 InlineButton("🗑 Yes, delete", f"del:confirm:{ch.id}"),
                 InlineButton("Cancel", f"del:cancel:{ch.id}"),
@@ -456,7 +443,7 @@ class App:
         assert self.channel_repo is not None
         ch = await self.channel_repo.get(channel_id)
         if ch is None:
-            await self.tg.send_message(f"Channel `{channel_id}` not found.")
+            await self.tg.send_message(f"Channel <code>{_html_escape(channel_id)}</code> not found.")
             return
         if self.scheduler:
             self.scheduler.unschedule_channel(channel_id)
@@ -467,7 +454,7 @@ class App:
                 yaml_path.unlink()
         except Exception as e:
             log.warning("Failed to remove %s: %s", yaml_path, e)
-        await self.tg.send_message(f"Deleted `{channel_id}` ✅")
+        await self.tg.send_message(f"Deleted <code>{_html_escape(channel_id)}</code> ✅")
         await self._update_bot_commands()
 
 

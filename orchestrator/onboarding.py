@@ -19,7 +19,7 @@ from agents.setup_agent import (
 from llm.cost import estimate_cost, usage_from_result
 from llm.models import ModelFactory
 from orchestrator.models import AppConfig
-from orchestrator.orchestrator import _md_escape
+from orchestrator.orchestrator import _html_escape, md_to_html
 from storage.repositories import ChannelRepo, UsageRepo
 from telegram_client.client import InlineButton, TelegramBotClient
 
@@ -70,13 +70,13 @@ class OnboardingFlow:
             active=True, awaiting_reply=True, user_locale_hint=user_locale_hint
         )
         await self.tg.send_message(
-            "Let's set up a new channel. *Describe what you want* in your own words.\n\n"
+            "Let's set up a new channel. <b>Describe what you want</b> in your own words.\n\n"
             "Include things like:\n"
-            "• *Topic* — what should it be about?\n"
-            "• *Style / format* — bullets? a single word? a short news brief?\n"
-            "• *How often* — daily, every few hours, a few times a day…?\n"
-            "• *Sources* — should it pull from the live web, or just use the model's own knowledge?\n\n"
-            'Example: _"Send me one new Kazakh word per day with the meaning and an example sentence."_',
+            "• <b>Topic</b> — what should it be about?\n"
+            "• <b>Style / format</b> — bullets? a single word? a short news brief?\n"
+            "• <b>How often</b> — daily, every few hours, a few times a day…?\n"
+            "• <b>Sources</b> — should it pull from the live web, or just use the model's own knowledge?\n\n"
+            'Example: <i>"Send me one new Kazakh word per day with the meaning and an example sentence."</i>',
             force_reply=True,
         )
 
@@ -85,7 +85,7 @@ class OnboardingFlow:
     ) -> None:
         ch = await self.channels.get(channel_id)
         if ch is None:
-            await self.tg.send_message(f"Channel `{channel_id}` not found.")
+            await self.tg.send_message(f"Channel <code>{_html_escape(channel_id)}</code> not found.")
             return
         self.state = OnboardingState(
             active=True,
@@ -95,19 +95,19 @@ class OnboardingFlow:
         )
         sched = f"{ch.schedule_kind} {ch.schedule_spec}"
         if ch.format and ch.format.strip():
-            fmt_line = f"• *current format:*\n```\n{ch.format.strip()}\n```\n"
+            fmt_line = f"• <b>current format:</b>\n<pre>{_html_escape(ch.format.strip())}</pre>\n"
         else:
-            fmt_line = "• *current format:* `default`\n"
+            fmt_line = "• <b>current format:</b> <code>default</code>\n"
         await self.tg.send_message(
-            f"Editing `{ch.id}` — {_md_escape(ch.display_name)}.\n\n"
-            f"• *current schedule:* `{sched}`\n"
+            f"Editing <code>{_html_escape(ch.id)}</code> — {_html_escape(ch.display_name)}.\n\n"
+            f"• <b>current schedule:</b> <code>{_html_escape(sched)}</code>\n"
             f"{fmt_line}"
-            f"• *current prompt:*\n```\n{ch.topic_prompt_active}\n```\n\n"
+            f"• <b>current prompt:</b>\n<pre>{_html_escape(ch.topic_prompt_active)}</pre>\n\n"
             "Tell me what to change in your own words — schedule, prompt/topic, format, "
             "or anything else. Examples:\n"
-            '• _"Fire every day at 9am Moscow time instead."_\n'
-            '• _"Make it focus on AI safety news only, skip product launches."_\n'
-            '• _"Both — change schedule to 8am GMT+5 and shorten the prompt."_',
+            '• <i>"Fire every day at 9am Moscow time instead."</i>\n'
+            '• <i>"Make it focus on AI safety news only, skip product launches."</i>\n'
+            '• <i>"Both — change schedule to 8am GMT+5 and shorten the prompt."</i>',
             force_reply=True,
         )
 
@@ -148,7 +148,7 @@ class OnboardingFlow:
                 )
         except Exception as e:
             log.exception("Failed to save channel: %s", e)
-            await self.tg.send_message(f"Failed to save channel: `{e}`")
+            await self.tg.send_message(f"Failed to save channel: <code>{_html_escape(str(e))}</code>")
             return
         yaml_path = self.channels_dir / f"{spec['id']}.yaml"
         try:
@@ -163,7 +163,7 @@ class OnboardingFlow:
         self.state = OnboardingState()
         verb = "Updated" if is_edit else "Created"
         await self.tg.send_message(
-            f"{verb} channel `{spec['id']}` ✅\n"
+            f"{verb} channel <code>{_html_escape(spec['id'])}</code> ✅\n"
             f"Use /channels to manage it, or /now to fire it immediately."
         )
 
@@ -230,7 +230,7 @@ class OnboardingFlow:
             )
         except Exception as e:
             log.exception("Setup assistant failed: %s", e)
-            await self.tg.send_message(f"Setup failed: `{e}`")
+            await self.tg.send_message(f"Setup failed: <code>{_html_escape(str(e))}</code>")
             self.state.awaiting_reply = True
             return
 
@@ -253,9 +253,9 @@ class OnboardingFlow:
             return
 
         # Still gathering info — show message + clarifying questions, await next reply.
-        body = out.assistant_message.strip()
+        body = md_to_html(out.assistant_message.strip())
         if out.clarifying_questions:
-            body += "\n\n" + "\n".join(f"• {q}" for q in out.clarifying_questions)
+            body += "\n\n" + "\n".join(f"• {md_to_html(q)}" for q in out.clarifying_questions)
         self.state.awaiting_reply = True
         await self.tg.send_message(body, force_reply=True)
 
@@ -264,32 +264,32 @@ class OnboardingFlow:
         p = out.proposed_channel
         sched = f"{p.schedule.kind} {p.schedule.spec}"
         if p.format and p.format.strip():
-            fmt_line = f"• *format:*\n```\n{p.format.strip()}\n```\n"
+            fmt_line = f"• <b>format:</b>\n<pre>{_html_escape(p.format.strip())}</pre>\n"
         else:
-            fmt_line = "• *format:* `default`\n"
+            fmt_line = "• <b>format:</b> <code>default</code>\n"
         freshness_line = ""
         if p.mode == "sourced":
             if p.freshness_days:
                 freshness_line = (
-                    f"• *freshness:* only items published in the last "
+                    f"• <b>freshness:</b> only items published in the last "
                     f"{p.freshness_days} day(s)\n"
                 )
             else:
-                freshness_line = "• *freshness:* last 7 day(s) (default)\n"
+                freshness_line = "• <b>freshness:</b> last 7 day(s) (default)\n"
         summary = (
-            f"*Proposed channel*\n"
-            f"_{_md_escape(out.assistant_message)}_\n\n"
-            f"• *id:* `{p.id}`\n"
-            f"• *name:* {_md_escape(p.display_name)}\n"
-            f"• *hashtag:* `{p.hashtag}`\n"
-            f"• *mode:* {p.mode}\n"
-            f"• *schedule:* `{sched}`\n"
+            f"<b>Proposed channel</b>\n"
+            f"<i>{md_to_html(out.assistant_message)}</i>\n\n"
+            f"• <b>id:</b> <code>{_html_escape(p.id)}</code>\n"
+            f"• <b>name:</b> {_html_escape(p.display_name)}\n"
+            f"• <b>hashtag:</b> <code>{_html_escape(p.hashtag)}</code>\n"
+            f"• <b>mode:</b> {_html_escape(p.mode)}\n"
+            f"• <b>schedule:</b> <code>{_html_escape(sched)}</code>\n"
             f"{freshness_line}"
             f"{fmt_line}\n"
-            f"*Prompt:*\n```\n{p.topic_prompt}\n```"
+            f"<b>Prompt:</b>\n<pre>{_html_escape(p.topic_prompt)}</pre>"
         )
         if p.mode == "sourced" and p.research_prompt and p.research_prompt.strip():
-            summary += f"\n*Research brief:*\n```\n{p.research_prompt.strip()}\n```"
+            summary += f"\n<b>Research brief:</b>\n<pre>{_html_escape(p.research_prompt.strip())}</pre>"
         await self.tg.send_message(
             summary,
             buttons=[

@@ -106,13 +106,8 @@ class TelegramBotClient:
         if data.get("ok"):
             return data["result"]["message_id"]
         if parse_mode and "parse" in str(data.get("description", "")).lower():
-            log.warning("Parse mode %s rejected by Telegram (%s); retrying with Markdown", parse_mode, data.get("description"))
+            log.warning("Parse mode %s rejected by Telegram (%s); sending as plain text", parse_mode, data.get("description"))
             retry = dict(payload)
-            retry["parse_mode"] = "Markdown"
-            data = await self._api("sendMessage", retry)
-            if data.get("ok"):
-                return data["result"]["message_id"]
-            log.warning("Markdown also rejected; sending as plain text")
             retry.pop("parse_mode", None)
             data = await self._api("sendMessage", retry)
             if data.get("ok"):
@@ -127,7 +122,7 @@ class TelegramBotClient:
         reply_to: Optional[int] = None,
         buttons: Optional[list[InlineButton]] = None,
         button_columns: int = 1,
-        parse_mode: Optional[str] = "Markdown",
+        parse_mode: Optional[str] = "HTML",
         force_reply: bool = False,
     ) -> Optional[int]:
         chat = chat_id or self.cfg.owner_chat_id

@@ -52,10 +52,6 @@ class CostControlConfig(BaseModel):
     downgrade_to: str = "gpt-5.4-mini"
 
 
-class SchedulingConfig(BaseModel):
-    probabilistic_jitter_seconds: int = 1800
-
-
 class StorageConfig(BaseModel):
     db_path: str = "data/news-bot.sqlite"
 
@@ -75,7 +71,6 @@ class AppConfig(BaseModel):
     researcher: ResearcherConfig = Field(default_factory=ResearcherConfig)
     dedup: DedupConfig = Field(default_factory=DedupConfig)
     cost_control: CostControlConfig = Field(default_factory=CostControlConfig)
-    scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
