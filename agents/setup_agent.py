@@ -4,7 +4,8 @@ import logging
 from typing import Optional
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ModelRetry
+from pydantic_ai.output import PromptedOutput
 
 from agents.deps import SetupAgentDeps
 from orchestrator.prompt_builder import render
@@ -29,6 +30,20 @@ class ProposedChannel(BaseModel):
     display_name: str
     hashtag: str = Field(description="Hashtag including '#', e.g. '#ai_news'.")
     mode: str = Field(description="Either 'sourced' (live web search) or 'llm_only'.")
+    research_depth: str = Field(
+        default="single",
+        description=(
+            "Sourced channels ONLY. How thorough the live research is per post:\n"
+            "- 'single' (regular): find the one best source and write from it. Faster "
+            "and cheaper — fewer fetches and tokens. This is the sensible default.\n"
+            "- 'deep': pick an anchor story, then gather several supporting sources "
+            "and synthesise them into one richer, more cross-checked post. Slower and "
+            "more expensive (more fetches and tokens).\n"
+            "Default to 'single' unless the user clearly asks for in-depth / thorough "
+            "/ multi-source / well-researched coverage. Always 'single' for 'llm_only' "
+            "channels (they do no research)."
+        ),
+    )
     topic_prompt: str = Field(description="Free-form description of what the channel should publish.")
     research_prompt: Optional[str] = Field(
         default=None,
@@ -80,11 +95,39 @@ class SetupAgentOutput(BaseModel):
 
 setup_agent: Agent[SetupAgentDeps, SetupAgentOutput] = Agent(
     name="setup_agent",
-    output_type=SetupAgentOutput,
+    # PromptedOutput puts the JSON schema + "return JSON" instructions in the
+    # prompt and parses/validates the reply itself, instead of relying on the
+    # model's native tool-calling fidelity. Weaker / non-OpenAI providers (e.g.
+    # Fireworks' minimax) otherwise drop the nested `proposed_channel` object and
+    # answer in prose, which silently skips the confirm button.
+    output_type=PromptedOutput(SetupAgentOutput),
     deps_type=SetupAgentDeps,
     instrument=True,
-    retries=1,
+    retries=2,
 )
+
+
+@setup_agent.output_validator
+def _ensure_proposal_complete(output: SetupAgentOutput) -> SetupAgentOutput:
+    """Never let a 'final' answer through without the structured proposal.
+
+    The confirm button + pre-formatted prompt are only rendered when
+    `proposed_channel` is present. If the model writes a proposal in prose but
+    forgets to fill the object, force a retry rather than showing the user a
+    dead-end message that talks about a button that won't appear.
+    """
+    looks_final = output.ready_to_save or not output.clarifying_questions
+    if looks_final and output.proposed_channel is None:
+        raise ModelRetry(
+            "Your message reads like a final channel proposal, but "
+            "`proposed_channel` is null. To actually show the user the "
+            "'✅ Create channel' button you MUST return a COMPLETE "
+            "`proposed_channel` object AND set `ready_to_save = true`. "
+            "If you still need more information instead, set "
+            "`ready_to_save = false`, leave `proposed_channel` null, and put "
+            "your question(s) in `clarifying_questions`."
+        )
+    return output
 
 
 def render_system_prompt(deps: SetupAgentDeps) -> str:

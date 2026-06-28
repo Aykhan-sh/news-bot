@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 import yaml
+
+try:  # Laminar is optional; tracing degrades to a no-op when it's absent.
+    from lmnr import Laminar
+except Exception:  # pragma: no cover - lmnr not installed
+    Laminar = None  # type: ignore[assignment]
 
 from agents.deps import SetupAgentDeps
 from agents.history import build_message_history
@@ -33,6 +39,7 @@ class OnboardingState:
     last_proposal: Optional[ProposedChannel] = None
     user_locale_hint: Optional[str] = None
     editing_channel_id: Optional[str] = None
+    trace_ctx: Optional[str] = None
 
 
 class OnboardingFlow:
@@ -66,13 +73,18 @@ class OnboardingFlow:
         self.state = OnboardingState(
             active=True, awaiting_reply=True, user_locale_hint=user_locale_hint
         )
+        self.state.trace_ctx = self._new_trace_ctx("onboarding:new")
         await self.tg.send_message(
             "Let's set up a new channel. <b>Describe what you want</b> in your own words.\n\n"
             "Include things like:\n"
             "• <b>Topic</b> — what should it be about?\n"
             "• <b>Style / format</b> — bullets? a single word? a short news brief?\n"
             "• <b>How often</b> — daily, every few hours, a few times a day…?\n"
-            "• <b>Sources</b> — should it pull from the live web, or just use the model's own knowledge?\n\n"
+            "• <b>Sources</b> — should it pull from the live web, or just use the model's own knowledge?\n"
+            "• If you go with <b>live web (sourced)</b>, say whether you want "
+            "<b>deep</b> or <b>regular</b> research — regular uses a single best "
+            "source (cheaper, but not as deep), while deep pulls several sources "
+            "into one richer post.\n\n"
             'Example: <i>"Send me one new Kazakh word per day with the meaning and an example sentence."</i>',
             force_reply=True,
         )
@@ -90,23 +102,44 @@ class OnboardingFlow:
             user_locale_hint=user_locale_hint,
             editing_channel_id=channel_id,
         )
+        self.state.trace_ctx = self._new_trace_ctx(f"onboarding:edit:{channel_id}")
         sched = f"{ch.schedule_kind} {ch.schedule_spec}"
-        if ch.format and ch.format.strip():
-            fmt_line = f"• <b>current format:</b>\n<pre>{_html_escape(ch.format.strip())}</pre>\n"
-        else:
-            fmt_line = "• <b>current format:</b> <code>default</code>\n"
-        await self.tg.send_message(
+        depth_line = ""
+        if ch.mode == "sourced":
+            depth_word = "deep (multi-source)" if ch.research_depth == "deep" else "regular (single source)"
+            depth_line = f"• <b>current research:</b> <code>{depth_word}</code>\n"
+        body = (
             f"Editing <code>{_html_escape(ch.id)}</code> — {_html_escape(ch.display_name)}.\n\n"
             f"• <b>current schedule:</b> <code>{_html_escape(sched)}</code>\n"
-            f"{fmt_line}"
-            f"• <b>current prompt:</b>\n<pre>{_html_escape(ch.topic_prompt_active)}</pre>\n\n"
-            "Tell me what to change in your own words — schedule, prompt/topic, format, "
+            f"{depth_line}"
+            f"\n<b>current writer prompt:</b>\n<pre>{_html_escape(ch.topic_prompt_active)}</pre>"
+        )
+        if ch.mode == "sourced":
+            if ch.research_prompt and ch.research_prompt.strip():
+                body += (
+                    f"\n<b>current research agent prompt:</b>\n"
+                    f"<pre>{_html_escape(ch.research_prompt.strip())}</pre>"
+                )
+            else:
+                body += (
+                    "\n<b>current research agent prompt:</b> "
+                    "<code>default (falls back to writer prompt)</code>"
+                )
+        if ch.format and ch.format.strip():
+            body += (
+                f"\n<b>current writer's tone prompt:</b>\n"
+                f"<pre>{_html_escape(ch.format.strip())}</pre>"
+            )
+        else:
+            body += "\n<b>current writer's tone prompt:</b> <code>default</code>"
+        body += (
+            "\n\nTell me what to change in your own words — schedule, prompt/topic, format, "
             "or anything else. Examples:\n"
             '• <i>"Fire every day at 9am Moscow time instead."</i>\n'
             '• <i>"Make it focus on AI safety news only, skip product launches."</i>\n'
-            '• <i>"Both — change schedule to 8am GMT+5 and shorten the prompt."</i>',
-            force_reply=True,
+            '• <i>"Both — change schedule to 8am GMT+5 and shorten the prompt."</i>'
         )
+        await self.tg.send_message(body, force_reply=True)
 
     def is_active(self) -> bool:
         return self.state.active
@@ -159,10 +192,37 @@ class OnboardingFlow:
         await self.on_channel_saved(spec["id"])
         self.state = OnboardingState()
         verb = "Updated" if is_edit else "Created"
-        await self.tg.send_message(
+        depth_line = ""
+        if spec.get("mode") == "sourced":
+            depth_word = (
+                "deep (anchor + supporting sources)"
+                if spec.get("research_depth") == "deep"
+                else "regular (single source)"
+            )
+            depth_line = f"• <b>research:</b> {depth_word}\n"
+        msg = (
             f"{verb} channel <code>{_html_escape(spec['id'])}</code> ✅\n"
-            f"Use /channels to manage it, or /now to fire it immediately."
+            f"{depth_line}"
+            f"\n<b>Writer prompt:</b>\n<pre>{_html_escape(spec['topic_prompt'])}</pre>"
         )
+        if (
+            spec.get("mode") == "sourced"
+            and spec.get("research_prompt")
+            and spec["research_prompt"].strip()
+        ):
+            msg += (
+                f"\n<b>Research agent prompt:</b>\n"
+                f"<pre>{_html_escape(spec['research_prompt'].strip())}</pre>"
+            )
+        if spec.get("format") and spec["format"].strip():
+            msg += (
+                f"\n<b>Writer's tone prompt:</b>\n"
+                f"<pre>{_html_escape(spec['format'].strip())}</pre>"
+            )
+        else:
+            msg += "\n<b>Writer's tone prompt:</b> <code>default</code>"
+        msg += "\n\nUse /channels to manage it, or /now to fire it immediately."
+        await self.tg.send_message(msg)
 
     async def on_more_feedback(self) -> None:
         if not self.state.active:
@@ -174,6 +234,37 @@ class OnboardingFlow:
         )
 
     # ----- internals -----
+
+    def _new_trace_ctx(self, name: str) -> Optional[str]:
+        """Open a root span for the whole conversation and return its serialized
+        context, or None when Laminar is off.
+
+        Every turn re-attaches to this context (see `_turn_span`) so that all
+        `setup_agent.run` calls of one onboarding/edit conversation land in a
+        single Laminar trace instead of one trace per message.
+        """
+        if Laminar is None or not Laminar.is_initialized():
+            return None
+        try:
+            with Laminar.start_as_current_span(name=name):
+                return Laminar.serialize_span_context()
+        except Exception as e:  # pragma: no cover - tracing must never break the flow
+            log.warning("Laminar trace start failed: %s", e)
+            return None
+
+    def _turn_span(self):
+        """Context manager nesting this turn's agent run under the conversation
+        trace. No-op when Laminar is off or no root context was captured."""
+        if Laminar is None or not Laminar.is_initialized() or not self.state.trace_ctx:
+            return nullcontext()
+        try:
+            parent = Laminar.deserialize_span_context(self.state.trace_ctx)
+            return Laminar.start_as_current_span(
+                name="setup_turn", parent_span_context=parent
+            )
+        except Exception as e:  # pragma: no cover - tracing must never break the flow
+            log.warning("Laminar turn span failed: %s", e)
+            return nullcontext()
 
     async def _run_assistant(self, user_text: str) -> None:
         self.state.history.append({"role": "user", "text": user_text})
@@ -197,6 +288,7 @@ class OnboardingFlow:
                     "display_name": ch.display_name,
                     "hashtag": ch.hashtag,
                     "mode": ch.mode,
+                    "research_depth": ch.research_depth,
                     "format": ch.format,
                     "schedule_kind": ch.schedule_kind,
                     "schedule_spec": ch.schedule_spec,
@@ -218,12 +310,13 @@ class OnboardingFlow:
 
         model = self.models.get(self.cfg.model_for("setup"))
         try:
-            result = await setup_agent.run(
-                user_prompt=user_text,
-                deps=deps,
-                model=model,
-                message_history=message_history,
-            )
+            with self._turn_span():
+                result = await setup_agent.run(
+                    user_prompt=user_text,
+                    deps=deps,
+                    model=model,
+                    message_history=message_history,
+                )
         except Exception as e:
             log.exception("Setup assistant failed: %s", e)
             await self.tg.send_message(f"Setup failed: <code>{_html_escape(str(e))}</code>")
@@ -233,7 +326,8 @@ class OnboardingFlow:
         out: SetupAgentOutput = result.output
         self.state.history.append({"role": "assistant", "text": out.assistant_message})
 
-        if out.ready_to_save and out.proposed_channel is not None:
+        ready = out.ready_to_save or not out.clarifying_questions
+        if out.proposed_channel is not None and ready:
             self.state.last_proposal = out.proposed_channel
             await self._send_proposal(out)
             return
@@ -249,11 +343,8 @@ class OnboardingFlow:
         assert out.proposed_channel is not None
         p = out.proposed_channel
         sched = f"{p.schedule.kind} {p.schedule.spec}"
-        if p.format and p.format.strip():
-            fmt_line = f"• <b>format:</b>\n<pre>{_html_escape(p.format.strip())}</pre>\n"
-        else:
-            fmt_line = "• <b>format:</b> <code>default</code>\n"
         freshness_line = ""
+        depth_line = ""
         if p.mode == "sourced":
             if p.freshness_days:
                 freshness_line = (
@@ -262,6 +353,16 @@ class OnboardingFlow:
                 )
             else:
                 freshness_line = "• <b>freshness:</b> last 7 day(s) (default)\n"
+            if p.research_depth == "deep":
+                depth_line = (
+                    "• <b>research:</b> deep — anchor story + several supporting "
+                    "sources (slower, more expensive)\n"
+                )
+            else:
+                depth_line = (
+                    "• <b>research:</b> regular — single best source "
+                    "(faster, cheaper)\n"
+                )
         summary = (
             f"<b>Proposed channel</b>\n"
             f"<i>{md_to_html(out.assistant_message)}</i>\n\n"
@@ -271,11 +372,15 @@ class OnboardingFlow:
             f"• <b>mode:</b> {_html_escape(p.mode)}\n"
             f"• <b>schedule:</b> <code>{_html_escape(sched)}</code>\n"
             f"{freshness_line}"
-            f"{fmt_line}\n"
-            f"<b>Prompt:</b>\n<pre>{_html_escape(p.topic_prompt)}</pre>"
+            f"{depth_line}"
+            f"\n<b>Writer prompt:</b>\n<pre>{_html_escape(p.topic_prompt)}</pre>"
         )
         if p.mode == "sourced" and p.research_prompt and p.research_prompt.strip():
-            summary += f"\n<b>Research brief:</b>\n<pre>{_html_escape(p.research_prompt.strip())}</pre>"
+            summary += f"\n<b>Research agent prompt:</b>\n<pre>{_html_escape(p.research_prompt.strip())}</pre>"
+        if p.format and p.format.strip():
+            summary += f"\n<b>Writer's tone prompt:</b>\n<pre>{_html_escape(p.format.strip())}</pre>"
+        else:
+            summary += "\n<b>Writer's tone prompt:</b> <code>default</code>"
         await self.tg.send_message(
             summary,
             buttons=[
@@ -299,7 +404,10 @@ class OnboardingFlow:
             spec["format"] = p.format.strip()
         if p.mode == "sourced":
             spec["model_researcher"] = self.cfg.model_for("researcher")
+            spec["research_depth"] = "deep" if p.research_depth == "deep" else "single"
             spec["search"] = {"freshness_days": p.freshness_days}
             if p.research_prompt and p.research_prompt.strip():
                 spec["research_prompt"] = p.research_prompt.strip()
+        else:
+            spec["research_depth"] = "single"
         return spec

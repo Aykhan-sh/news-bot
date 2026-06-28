@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -83,22 +84,64 @@ class TelegramBotClient:
     # Telegram hard-caps a text message at 4096 chars; stay safely under it.
     _MAX_TEXT = 4000
 
+    _TAG_RE = re.compile(r"<(/?)([a-zA-Z0-9]+)[^>]*>")
+
+    @classmethod
+    def _balance_tags(cls, chunk: str) -> tuple[str, str]:
+        """Return (closers, openers) to balance a chunk's HTML tags.
+
+        Telegram rejects a message whose entities aren't closed within it, so
+        when a chunk is cut mid-`<pre>`/`<b>`/… we must close the open tags at
+        the end of this chunk and re-open them at the start of the next. Returns
+        the closing tags to append here and the original opening tags to prepend
+        to the remainder.
+        """
+        stack: list[tuple[str, str]] = []  # (tag_name, full_opening_tag)
+        for m in cls._TAG_RE.finditer(chunk):
+            name = m.group(2).lower()
+            if m.group(1) == "/":
+                for i in range(len(stack) - 1, -1, -1):
+                    if stack[i][0] == name:
+                        del stack[i]
+                        break
+            else:
+                stack.append((name, m.group(0)))
+        closers = "".join(f"</{name}>" for name, _ in reversed(stack))
+        openers = "".join(full for _, full in stack)
+        return closers, openers
+
     @classmethod
     def _split_text(cls, text: str) -> list[str]:
-        """Split text into Telegram-sized chunks, preferring newline boundaries."""
+        """Split text into Telegram-sized chunks, preferring newline boundaries
+        and keeping HTML tags balanced within each chunk."""
         if len(text) <= cls._MAX_TEXT:
             return [text]
         chunks: list[str] = []
         remaining = text
-        while len(remaining) > cls._MAX_TEXT:
+        carry = ""
+        while remaining:
+            remaining = carry + remaining
+            carry = ""
+            if len(remaining) <= cls._MAX_TEXT:
+                chunks.append(remaining)
+                break
             window = remaining[: cls._MAX_TEXT]
             split_at = window.rfind("\n")
             if split_at <= 0:
-                split_at = cls._MAX_TEXT
-            chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:].lstrip("\n")
-        if remaining:
-            chunks.append(remaining)
+                # No newline to break on; avoid cutting inside a tag.
+                last_gt = window.rfind(">")
+                last_lt = window.rfind("<")
+                split_at = (
+                    last_lt if last_lt > last_gt else cls._MAX_TEXT
+                )
+                if split_at <= 0:
+                    split_at = cls._MAX_TEXT
+            chunk = remaining[:split_at]
+            rest = remaining[split_at:].lstrip("\n")
+            closers, openers = cls._balance_tags(chunk)
+            chunks.append(chunk + closers)
+            carry = openers
+            remaining = rest
         return chunks
 
     async def _send_one(self, payload: dict[str, Any], parse_mode: Optional[str]) -> Optional[int]:

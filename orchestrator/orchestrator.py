@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import nullcontext
 from typing import Optional
 
 from pydantic_ai.settings import ModelSettings
+
+try:  # Laminar is optional; tracing degrades to a no-op when it's absent.
+    from lmnr import Laminar
+except Exception:  # pragma: no cover - lmnr not installed
+    Laminar = None  # type: ignore[assignment]
 
 from agents.deps import ResearcherDeps, WriterDeps
 from agents.researcher import (
@@ -25,6 +31,19 @@ from storage.repositories import (
 from telegram_client.client import InlineButton, TelegramBotClient
 
 log = logging.getLogger(__name__)
+
+
+def _tick_span(name: str, **attrs):
+    """Group every agent run of one channel tick under a single Laminar trace.
+
+    pydantic-ai's per-agent instrumentation opens a fresh root span (hence a new
+    trace) for each `agent.run`, so the researcher and writer of one tick would
+    otherwise land in two separate traces. Opening a parent span here makes them
+    children of one trace. No-op when Laminar isn't initialised.
+    """
+    if Laminar is not None and Laminar.is_initialized():
+        return Laminar.start_as_current_span(name=name, input=attrs or None)
+    return nullcontext()
 
 
 def _html_escape(text: str) -> str:
@@ -116,24 +135,30 @@ class Orchestrator:
 
         log.info("Firing channel %s (mode=%s, trigger=%s)", channel.id, channel.mode, triggered_by)
 
-        writer_model = self.cfg.model_for("writer")
-        researcher_model = self.cfg.model_for("researcher")
+        with _tick_span(
+            f"channel_tick:{channel.id}",
+            channel_id=channel.id,
+            mode=channel.mode,
+            triggered_by=triggered_by,
+        ):
+            writer_model = self.cfg.model_for("writer")
+            researcher_model = self.cfg.model_for("researcher")
 
-        window = await self.dedup.sliding_window(channel.id, channel.dedup_window_n)
+            window = await self.dedup.sliding_window(channel.id, channel.dedup_window_n)
 
-        research_note: Optional[dict] = None
-        research_vector: Optional[list[float]] = None
-        supporting_notes: list[dict] = []
-        if channel.mode == "sourced":
-            researcher_result = await self._run_researcher(channel, window, researcher_model)
-            if researcher_result is None:
-                await self._send_nothing_new(channel)
-                return
-            research_note, research_vector, supporting_notes = researcher_result
+            research_note: Optional[dict] = None
+            research_vector: Optional[list[float]] = None
+            supporting_notes: list[dict] = []
+            if channel.mode == "sourced":
+                researcher_result = await self._run_researcher(channel, window, researcher_model)
+                if researcher_result is None:
+                    await self._send_nothing_new(channel)
+                    return
+                research_note, research_vector, supporting_notes = researcher_result
 
-        await self._run_writer_and_send(
-            channel, window, research_note, research_vector, supporting_notes, writer_model
-        )
+            await self._run_writer_and_send(
+                channel, window, research_note, research_vector, supporting_notes, writer_model
+            )
 
     # ------------------------------------------------------------------
     # Researcher path
