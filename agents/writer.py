@@ -24,6 +24,7 @@ class WriterOutput(BaseModel):
 
 
 writer_agent: Agent[WriterDeps, WriterOutput] = Agent(
+    name="writer",
     output_type=WriterOutput,
     deps_type=WriterDeps,
     instrument=True,

@@ -12,7 +12,6 @@ from agents.prompt_refiner import (
     prompt_refiner_agent,
     render_system_prompt,
 )
-from llm.cost import estimate_cost, usage_from_result
 from llm.models import ModelFactory
 from orchestrator.models import AppConfig
 from orchestrator.orchestrator import _html_escape, md_to_html
@@ -21,7 +20,6 @@ from storage.repositories import (
     MessageRepo,
     PendingPromptRepo,
     RefinementSessionRepo,
-    UsageRepo,
 )
 from telegram_client.client import InlineButton, TelegramBotClient
 
@@ -44,7 +42,6 @@ class FeedbackFlow:
         messages: MessageRepo,
         pending: PendingPromptRepo,
         sessions: RefinementSessionRepo,
-        usage: UsageRepo,
         on_channel_saved: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> None:
         self.cfg = cfg
@@ -54,7 +51,6 @@ class FeedbackFlow:
         self.messages = messages
         self.pending = pending
         self.sessions = sessions
-        self.usage = usage
         self.on_channel_saved = on_channel_saved
         self.state = FeedbackState()
 
@@ -203,8 +199,7 @@ class FeedbackFlow:
             render_system_prompt(deps), prior_turns
         )
 
-        model_id = self.cfg.openai.default_refiner_model
-        model = self.models.get(model_id)
+        model = self.models.get(self.cfg.model_for("refiner"))
         try:
             result = await prompt_refiner_agent.run(
                 user_prompt=user_feedback,
@@ -216,9 +211,6 @@ class FeedbackFlow:
             log.exception("Prompt refiner failed: %s", e)
             await self.tg.send_message(f"Refinement failed: {e}")
             return
-
-        tin, tout = usage_from_result(result)
-        await self.usage.insert(channel.id, "prompt_refiner", model_id, tin, tout, estimate_cost(model_id, tin, tout))
 
         out: PromptRefinerOutput = result.output
         proposed_prompt = deps.working_prompt

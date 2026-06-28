@@ -4,14 +4,33 @@ telegram:
   bot_token: "REPLACE_ME"
   owner_chat_id: 111222333
 
-openai:
-  api_key: "sk-REPLACE_ME"
-  default_writer_model: gpt-5.4-mini
-  default_researcher_model: gpt-5.4-mini
-  default_refiner_model: gpt-5.4-mini
-  default_setup_model: gpt-5.4-mini
-  embedding_model: text-embedding-3-small # used for duplicate/collision detection
-  flex_mode: false # set to true to use OpenAI flex service tier (lower cost, slower)
+# Provider credentials. The map KEY is the pydantic-ai provider name; its api_key
+# (and optional base_url) are exported as {NAME}_API_KEY / {NAME}_BASE_URL so
+# pydantic-ai resolves them automatically. Add any provider pydantic-ai supports
+# (openai, fireworks, together, groq, mistral, deepseek, openrouter, ...) — no
+# code changes required.
+providers:
+  openai:
+    api_key: "sk-REPLACE_ME"
+    # base_url: "https://..."   # optional: for an OpenAI-compatible gateway
+  # fireworks:
+  #   api_key: "fw-REPLACE_ME"
+  # together:
+  #   api_key: "..."
+
+# Per-role model in pydantic-ai "provider:model" form. Use "openai-responses:" for
+# OpenAI (enables native web search via the Responses API); "openai-chat:" for
+# plain chat completions; "fireworks:accounts/fireworks/models/...", "groq:...",
+# etc. for other providers.
+# Note: only OpenAI (Responses API) has a native web-search tool — a researcher on
+# any other provider automatically falls back to a keyless DuckDuckGo web_search.
+models:
+  writer: "openai-responses:gpt-5.4-mini"
+  researcher: "openai-responses:gpt-5.4-mini"
+  refiner: "openai-responses:gpt-5.4-mini"
+  setup: "openai-responses:gpt-5.4-mini"
+  embedding: "text-embedding-3-small" # OpenAI; used for duplicate/collision detection
+  openai_flex: false # apply OpenAI flex service tier to openai-responses models
 
 researcher:
   per_tick_fetch_budget: 8 # hard cap on fetch_url calls per channel tick
@@ -25,12 +44,6 @@ dedup:
   lookback_days: 14 # only compare against posts from the last N days
   log_candidates: false # append every candidate + its top similarity scores to a JSONL file
   candidate_log_path: data/dedup_candidates.jsonl # where those score logs go when enabled
-
-cost_control:
-  global_daily_usd: 1.50
-  per_channel_default_daily_usd: 0.50
-  on_threshold: pause # warn | downgrade | pause
-  downgrade_to: gpt-5.4-mini
 
 storage:
   db_path: data/news-bot.sqlite

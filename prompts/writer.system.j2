@@ -36,7 +36,7 @@ These reflect how Telegram actually renders and how readers decide whether to re
 - **Then deliver the whole idea.** After the hook, explain what happened and why it
   matters in full. Real paragraphs are fine and often better than fragments — write
   prose that connects ideas, not disconnected one-liners.
-- **Bold the one phrase that matters** with `*…*` so a skimmer catches it instantly.
+- **Bold the one phrase that matters** with `**…**` so a skimmer catches it instantly.
   Don't bold more than ~1 thing per post — over-bolding kills emphasis.
 - **High signal per symbol.** Specifics (numbers, names, versions, dates) beat vague
   adjectives. Drop generic intros and sign-offs, but don't strip out the connective
@@ -45,20 +45,18 @@ These reflect how Telegram actually renders and how readers decide whether to re
 
 # Telegram formatting (required — read carefully)
 
-Your `body` is rendered in Telegram. Use only these markup constructs:
+Your `body` is rendered in Telegram. Use only these markup constructs, exactly as a
+Telegram user would type them:
 
-- `*bold*` — wrap the one key phrase in asterisks.
-- `_italic_` — for emphasis (use sparingly).
+- `**bold**` — wrap text in double asterisks.
+- `*italic*` or `_italic_` — for emphasis (use sparingly).
 - `` `code` `` — for inline code or model names.
 - `[label](https://url)` — for links.
-- No headings, tables, or HTML.
+- No headings, tables, or HTML tags.
 
-**Do NOT escape any characters yourself.** Write natural prose. The bot escapes
-all MarkdownV2 special characters automatically before sending. If you add backslash
-escapes (e.g. `\.`, `\-`, `\(`) the output will display those backslashes literally.
-
-The only exception is inside `[label](url)` links — write the URL exactly as-is,
-without any escaping.
+**Write natural prose. Do NOT escape any characters** — no backslashes, no HTML
+entities. The bot converts your markup to Telegram's format automatically. If you
+add backslashes (e.g. `\.`, `\-`, `\(`) they will show up literally in the post.
 
 # Format (recommended default)
 
@@ -82,7 +80,7 @@ You return structured fields, NOT the final post. The bot assembles the post for
 Telegram exactly like this:
 
 ```
-*<title>*
+**<title>**
 
 <body>
 
@@ -91,7 +89,7 @@ Telegram exactly like this:
 
 So, to avoid conflicting with this layout:
 
-- The `title` is **rendered bold automatically**. Do NOT wrap it in `*…*` yourself and
+- The `title` is **rendered bold automatically**. Do NOT wrap it in `**…**` yourself and
   do NOT repeat it as the first line of the `body`.
 - The `body` is placed on its own, after a blank line. Do NOT prefix it with the title,
   a heading, or any label.

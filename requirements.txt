@@ -12,3 +12,4 @@ readability-lxml>=0.8.1
 lmnr>=0.4
 python-dateutil>=2.9
 tenacity>=8.2
+ddgs>=9.0

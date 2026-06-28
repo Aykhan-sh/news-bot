@@ -16,6 +16,7 @@ class NewsQAOutput(BaseModel):
 
 
 news_qa_agent: Agent[NewsQADeps, NewsQAOutput] = Agent(
+    name="news_qa",
     output_type=NewsQAOutput,
     deps_type=NewsQADeps,
     instrument=True,

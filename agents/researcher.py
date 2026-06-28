@@ -9,9 +9,12 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 
 try:
-    from pydantic_ai.builtin_tools import WebSearchTool
+    from pydantic_ai.native_tools import WebSearchTool
 except ImportError:  # pragma: no cover - older pydantic-ai layout
-    from pydantic_ai.tools import WebSearchTool  # type: ignore[no-redef]
+    try:
+        from pydantic_ai.builtin_tools import WebSearchTool
+    except ImportError:
+        from pydantic_ai.tools import WebSearchTool  # type: ignore[no-redef]
 
 from agents.deps import Candidate, ResearcherDeps
 from orchestrator.dedup import build_embed_text
@@ -43,16 +46,6 @@ class ResearcherOutput(BaseModel):
     )
 
 
-researcher_agent: Agent[ResearcherDeps, ResearcherOutput] = Agent(
-    output_type=ResearcherOutput,
-    deps_type=ResearcherDeps,
-    builtin_tools=[WebSearchTool()],
-    instrument=True,
-    retries=1,
-)
-
-
-@researcher_agent.system_prompt
 async def _system_prompt(ctx: RunContext[ResearcherDeps]) -> str:
     return render(
         "researcher.j2",
@@ -64,7 +57,37 @@ async def _system_prompt(ctx: RunContext[ResearcherDeps]) -> str:
     )
 
 
-@researcher_agent.tool
+async def web_search(
+    ctx: RunContext[ResearcherDeps],
+    query: str,
+    max_results: int = 8,
+) -> list[dict]:
+    """Search the live web for `query` and return ranked hits.
+
+    Use this to discover candidate articles before reading them. Each hit has a
+    `url`, `title`, `snippet`, and (when known) `published_at`. Pick the most
+    promising urls and pass them to `fetch_url` to read the full text. The search
+    is scoped to this channel's freshness window and topic mode automatically.
+    """
+    channel = ctx.deps.channel
+    topic = "news" if (channel.search_topic or "general") == "news" else "general"
+    hits = await ctx.deps.web_search.search(
+        query,
+        days=channel.search_freshness_days or DEFAULT_RELEVANCE_DAYS,
+        topic=topic,  # type: ignore[arg-type]
+        k=max_results,
+    )
+    return [
+        {
+            "url": h.url,
+            "title": h.title,
+            "snippet": h.snippet,
+            "published_at": h.published_at,
+        }
+        for h in hits
+    ]
+
+
 async def fetch_url(
     ctx: RunContext[ResearcherDeps],
     url: str,
@@ -140,7 +163,6 @@ def _date_verdict(
     }
 
 
-@researcher_agent.tool
 async def check_relevance(
     ctx: RunContext[ResearcherDeps],
     freshness_days: Optional[int] = None,
@@ -241,3 +263,41 @@ async def check_relevance(
         "recommended_id": recommended_id,
         "message": message,
     }
+
+
+def build_researcher_agent(
+    *, native_search: bool
+) -> Agent[ResearcherDeps, ResearcherOutput]:
+    """Build a Researcher agent for the chosen provider's web-search capability.
+
+    `native_search=True` attaches OpenAI's built-in `WebSearchTool` (Responses
+    API). `native_search=False` is for providers without native web search
+    (Fireworks/GLM and other `OpenAIChatModel` endpoints): the built-in is
+    omitted and a regular `web_search` function tool (DuckDuckGo-backed) is
+    registered instead. The `fetch_url` / `check_relevance` loop is identical in
+    both cases.
+    """
+    agent: Agent[ResearcherDeps, ResearcherOutput] = Agent(
+        # Explicit name so the instrumentation/agent-run span is labelled
+        # "researcher" regardless of how the agent is invoked. Without it,
+        # PydanticAI infers the name from the caller's variable (the orchestrator
+        # holds it in a local `agent`), which mislabels the span.
+        name="researcher",
+        output_type=ResearcherOutput,
+        deps_type=ResearcherDeps,
+        builtin_tools=[WebSearchTool()] if native_search else [],
+        instrument=True,
+        retries=1,
+    )
+    agent.system_prompt(_system_prompt)
+    if not native_search:
+        agent.tool(web_search)
+    agent.tool(fetch_url)
+    agent.tool(check_relevance)
+    return agent
+
+
+# Native (OpenAI Responses) researcher — default. The fallback variant is used
+# for providers without native web search.
+researcher_agent = build_researcher_agent(native_search=True)
+researcher_agent_fallback = build_researcher_agent(native_search=False)

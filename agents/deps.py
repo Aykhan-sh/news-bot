@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from orchestrator.dedup import DedupEngine
+from sources.search import DuckDuckGoSearch, WebSearch
 from storage.repositories import ChannelRow, MessageRepo
 
 
@@ -51,6 +52,10 @@ class ResearcherDeps:
     # source id (e.g. "s1"). The orchestrator reuses the picked candidate's vector
     # when saving the post embedding instead of re-embedding the writer's output.
     fetched_vectors: dict[str, list[float]] = field(default_factory=dict)
+    # Web-search backend used by the fallback `web_search` tool when the researcher
+    # runs on a provider without native web search (e.g. Fireworks). Ignored when
+    # the researcher uses OpenAI's native `WebSearchTool`.
+    web_search: WebSearch = field(default_factory=DuckDuckGoSearch)
 
 
 @dataclass

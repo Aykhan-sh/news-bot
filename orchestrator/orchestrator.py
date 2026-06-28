@@ -10,11 +10,10 @@ from agents.deps import ResearcherDeps, WriterDeps
 from agents.researcher import (
     ResearcherOutput,
     researcher_agent,
+    researcher_agent_fallback,
 )
 from agents.writer import WriterOutput, writer_agent
-from llm.cost import estimate_cost, usage_from_result
 from llm.models import ModelFactory
-from orchestrator.cost import CostController
 from orchestrator.dedup import DedupEngine, build_embed_text
 from orchestrator.models import AppConfig
 from orchestrator.prompt_builder import render
@@ -22,7 +21,6 @@ from storage.repositories import (
     ChannelRepo,
     ChannelRow,
     MessageRepo,
-    UsageRepo,
 )
 from telegram_client.client import InlineButton, TelegramBotClient
 
@@ -101,8 +99,6 @@ class Orchestrator:
         models: ModelFactory,
         channels: ChannelRepo,
         messages: MessageRepo,
-        usage: UsageRepo,
-        cost: CostController,
         dedup: DedupEngine,
     ) -> None:
         self.cfg = cfg
@@ -110,8 +106,6 @@ class Orchestrator:
         self.models = models
         self.channels = channels
         self.messages = messages
-        self.usage = usage
-        self.cost = cost
         self.dedup = dedup
 
     async def fire_channel(self, channel_id: str, triggered_by: str = "scheduler") -> None:
@@ -122,13 +116,8 @@ class Orchestrator:
 
         log.info("Firing channel %s (mode=%s, trigger=%s)", channel.id, channel.mode, triggered_by)
 
-        precheck = await self.cost.precheck(channel.id, channel.model_writer)
-        if not precheck.allowed:
-            log.warning("Skipping channel %s: %s", channel.id, precheck.reason)
-            await self._notify_owner(f"Skipped <b>{_html_escape(channel.display_name)}</b>: {_html_escape(precheck.reason)}")
-            return
-        writer_model = precheck.model_override or channel.model_writer
-        researcher_model = precheck.model_override or (channel.model_researcher or self.cfg.openai.default_researcher_model)
+        writer_model = self.cfg.model_for("writer")
+        researcher_model = self.cfg.model_for("researcher")
 
         window = await self.dedup.sliding_window(channel.id, channel.dedup_window_n)
 
@@ -162,6 +151,13 @@ class Orchestrator:
             check_budget=self.cfg.researcher.per_tick_check_budget,
         )
         model = self.models.get(researcher_model)
+        # OpenAI uses the native WebSearchTool; providers without it (Fireworks/GLM)
+        # use the fallback agent that exposes a DuckDuckGo-backed web_search tool.
+        agent = (
+            researcher_agent
+            if self.models.supports_native_web_search(model)
+            else researcher_agent_fallback
+        )
         model_settings: Optional[ModelSettings] = None
         if self.cfg.researcher.temperature is not None:
             # Higher temperature diversifies the search queries across ticks so
@@ -180,7 +176,7 @@ class Orchestrator:
             ],
         ) + "\n\nBegin."
         try:
-            result = await researcher_agent.run(
+            result = await agent.run(
                 user_prompt=user_prompt,
                 deps=deps,
                 model=model,
@@ -189,8 +185,6 @@ class Orchestrator:
         except Exception as e:
             log.exception("Researcher failed for %s: %s", channel.id, e)
             return None
-
-        await self._record_usage(channel.id, "researcher", researcher_model, result)
 
         out: ResearcherOutput = result.output
         if out.picked_id is None:
@@ -252,16 +246,13 @@ class Orchestrator:
         except Exception as e:
             log.exception("Writer failed for %s: %s", channel.id, e)
             return
-        await self._record_usage(channel.id, "writer", writer_model, result)
         draft = result.output
 
         body_text = self._format_telegram_body(channel, draft)
         buttons = self._buttons_for_draft(channel, draft)
         tg_msg_id = await self.tg.send_message(body_text, buttons=buttons, parse_mode="HTML")
 
-        usage_tin = 0
-        usage_tout = 0
-        cost = 0.0  # Cost is in usage_ledger already; messages_sent aggregates roughly.
+        # Token/cost accounting now lives in Laminar; the messages row keeps zeros.
         msg_id = await self.messages.insert(
             channel_id=channel.id,
             title=draft.title,
@@ -270,9 +261,9 @@ class Orchestrator:
             keywords=draft.keywords,
             source_urls=draft.sources_used,
             telegram_message_id=tg_msg_id,
-            tokens_in=usage_tin,
-            tokens_out=usage_tout,
-            cost_usd=cost,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0.0,
         )
 
         # Store the post's embedding so future ticks can dedup against it.
@@ -349,8 +340,3 @@ class Orchestrator:
             await self.tg.send_message(text)
         except Exception:
             pass
-
-    async def _record_usage(self, channel_id: Optional[str], agent_name: str, model: str, result) -> None:
-        tin, tout = usage_from_result(result)
-        cost = estimate_cost(model, tin, tout)
-        await self.usage.insert(channel_id, agent_name, model, tin, tout, cost)

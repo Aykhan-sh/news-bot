@@ -17,6 +17,7 @@ class PromptRefinerOutput(BaseModel):
 
 
 prompt_refiner_agent: Agent[PromptRefinerDeps, PromptRefinerOutput] = Agent(
+    name="prompt_refiner",
     output_type=PromptRefinerOutput,
     deps_type=PromptRefinerDeps,
     instrument=True,

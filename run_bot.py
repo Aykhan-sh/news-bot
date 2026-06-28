@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import signal
 import sys
 from pathlib import Path
 
 from llm.embeddings import EmbeddingService
 from llm.models import ModelFactory
-from orchestrator.cost import CostController
 from orchestrator.dedup import DedupEngine
 from orchestrator.feedback import FeedbackFlow
 from orchestrator.models import AppConfig, load_channels_dir, load_config
@@ -23,7 +21,6 @@ from storage.repositories import (
     MessageRepo,
     PendingPromptRepo,
     RefinementSessionRepo,
-    UsageRepo,
 )
 from telegram_client.client import InlineButton, TelegramBotClient
 
@@ -43,9 +40,17 @@ def _maybe_init_laminar(cfg: AppConfig) -> None:
         log.info("Laminar disabled")
         return
     try:
-        from lmnr import Laminar
+        from lmnr import Instruments, Laminar
 
-        Laminar.initialize(project_api_key=cfg.observability.lmnr_project_api_key)
+        # Disable Laminar's own OpenAI SDK auto-instrumentation: PydanticAI
+        # (`instrument=True` on every agent) is the single source of spans. Without
+        # this, chat-completions providers (Fireworks and any OpenAI-compatible
+        # endpoint) get traced twice, producing stray `openai.chat` rows and
+        # fragmenting cost attribution.
+        Laminar.initialize(
+            project_api_key=cfg.observability.lmnr_project_api_key,
+            disabled_instruments={Instruments.OPENAI},
+        )
         log.info("Laminar initialised")
     except Exception as e:
         log.warning("Laminar init failed: %s", e)
@@ -55,8 +60,7 @@ class App:
     def __init__(self, cfg: AppConfig) -> None:
         self.cfg = cfg
         self.tg = TelegramBotClient(cfg.telegram, session_dir=str(ROOT / "data"))
-        os.environ.setdefault("OPENAI_API_KEY", cfg.openai.api_key)
-        self.models = ModelFactory(cfg.openai)
+        self.models = ModelFactory(cfg.providers, cfg.models)
         self.scheduler: ChannelScheduler | None = None
         self.orchestrator: Orchestrator | None = None
         self.feedback: FeedbackFlow | None = None
@@ -71,7 +75,6 @@ class App:
 
         self.channel_repo = ChannelRepo(db)
         self.message_repo = MessageRepo(db)
-        usage_repo = UsageRepo(db)
         pending_repo = PendingPromptRepo(db)
         session_repo = RefinementSessionRepo(db)
 
@@ -79,7 +82,7 @@ class App:
             await self.channel_repo.upsert_from_yaml(spec)
 
         embedder = EmbeddingService(
-            self.cfg.openai.api_key, self.cfg.openai.embedding_model
+            self.cfg.openai_api_key(), self.cfg.embedding_model()
         )
         dedup = DedupEngine(
             self.message_repo,
@@ -89,16 +92,12 @@ class App:
             log_candidates=self.cfg.dedup.log_candidates,
             candidate_log_path=self.cfg.dedup.candidate_log_path,
         )
-        cost = CostController(usage_repo, self.cfg.cost_control)
-
         self.orchestrator = Orchestrator(
             cfg=self.cfg,
             tg=self.tg,
             models=self.models,
             channels=self.channel_repo,
             messages=self.message_repo,
-            usage=usage_repo,
-            cost=cost,
             dedup=dedup,
         )
 
@@ -110,7 +109,6 @@ class App:
             messages=self.message_repo,
             pending=pending_repo,
             sessions=session_repo,
-            usage=usage_repo,
             on_channel_saved=self._on_channel_saved,
         )
 
@@ -120,7 +118,6 @@ class App:
             models=self.models,
             channels=self.channel_repo,
             messages=self.message_repo,
-            usage=usage_repo,
         )
 
         self.onboarding = OnboardingFlow(
@@ -128,7 +125,6 @@ class App:
             tg=self.tg,
             models=self.models,
             channels=self.channel_repo,
-            usage=usage_repo,
             channels_dir=ROOT / "channels",
             on_channel_saved=self._on_channel_saved,
         )
@@ -301,17 +297,16 @@ class App:
             else:
                 await self._send_channel_picker("edit", "Pick a channel to change:")
         elif cmd == "/usage":
-            usage_repo = UsageRepo(self.message_repo.db)  # type: ignore[attr-defined]
-            rows = await usage_repo.today_breakdown()
-            if not rows:
-                await self.tg.send_message("<i>No usage in the last 24h.</i>")
-                return
-            lines = [
-                f"<code>{_html_escape(r['channel_id'] or 'system')}</code> · {_html_escape(r['agent'])} · {_html_escape(r['model'])} · "
-                f"in={r['tin']} out={r['tout']} ${r['cost']:.4f}"
-                for r in rows
-            ]
-            await self.tg.send_message("Usage (last 24h):\n" + "\n".join(lines))
+            if self.cfg.observability.lmnr_enabled:
+                await self.tg.send_message(
+                    "Token usage and cost are tracked in Laminar — "
+                    'see your <a href="https://www.lmnr.ai">Laminar dashboard</a>.'
+                )
+            else:
+                await self.tg.send_message(
+                    "<i>Usage/cost tracking is handled by Laminar, which is currently "
+                    "disabled. Enable it under <code>observability</code> in your config.</i>"
+                )
         elif cmd == "/help":
             await self._send_help()
         else:

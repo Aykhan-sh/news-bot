@@ -79,6 +79,7 @@ class SetupAgentOutput(BaseModel):
 
 
 setup_agent: Agent[SetupAgentDeps, SetupAgentOutput] = Agent(
+    name="setup_agent",
     output_type=SetupAgentOutput,
     deps_type=SetupAgentDeps,
     instrument=True,

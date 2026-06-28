@@ -7,11 +7,10 @@ from typing import Optional
 from agents.deps import NewsQADeps
 from agents.history import build_message_history
 from agents.news_qa import news_qa_agent, render_system_prompt
-from llm.cost import estimate_cost, usage_from_result
 from llm.models import ModelFactory
 from orchestrator.models import AppConfig
 from orchestrator.orchestrator import md_to_html
-from storage.repositories import ChannelRepo, MessageRepo, UsageRepo
+from storage.repositories import ChannelRepo, MessageRepo
 from telegram_client.client import InlineButton, TelegramBotClient
 
 log = logging.getLogger(__name__)
@@ -36,14 +35,12 @@ class NewsQAFlow:
         models: ModelFactory,
         channels: ChannelRepo,
         messages: MessageRepo,
-        usage: UsageRepo,
     ) -> None:
         self.cfg = cfg
         self.tg = tg
         self.models = models
         self.channels = channels
         self.messages = messages
-        self.usage = usage
         self.state = QAState()
 
     def is_active(self) -> bool:
@@ -89,8 +86,7 @@ class NewsQAFlow:
         )
         self.state.history.append({"role": "user", "text": text})
 
-        model_id = ch.model_writer
-        model = self.models.get(model_id)
+        model = self.models.get(self.cfg.model_for("writer"))
         try:
             result = await news_qa_agent.run(
                 user_prompt=text,
@@ -103,11 +99,6 @@ class NewsQAFlow:
             await self.tg.send_message(f"Sorry, couldn't answer: <code>{e}</code>")
             self.state.awaiting_question = True
             return True
-
-        tin, tout = usage_from_result(result)
-        await self.usage.insert(
-            channel_id, "news_qa", model_id, tin, tout, estimate_cost(model_id, tin, tout)
-        )
 
         answer = result.output.answer
         self.state.history.append({"role": "assistant", "text": answer})

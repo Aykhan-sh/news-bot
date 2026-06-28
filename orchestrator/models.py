@@ -14,14 +14,36 @@ class TelegramConfig(BaseModel):
     owner_chat_id: int
 
 
-class OpenAIConfig(BaseModel):
-    api_key: str
-    default_writer_model: str = "gpt-5.4-mini"
-    default_researcher_model: str = "gpt-5.4-mini"
-    default_refiner_model: str = "gpt-5.4-mini"
-    default_setup_model: str = "gpt-5.4-mini"
-    embedding_model: str = "text-embedding-3-small"
-    flex_mode: bool = False
+class ProviderConfig(BaseModel):
+    """Credentials for a single pydantic-ai provider.
+
+    The map key in `AppConfig.providers` is the provider name (e.g. `openai`,
+    `fireworks`, `together`). These values are exported as `{NAME}_API_KEY` /
+    `{NAME}_BASE_URL` environment variables so pydantic-ai's `infer_model`
+    resolves them automatically — no provider is hardcoded in Python.
+    """
+
+    api_key: str = ""
+    base_url: Optional[str] = None
+
+
+class ModelsConfig(BaseModel):
+    """Per-role model identifiers in pydantic-ai `provider:model` form.
+
+    Examples: `openai-responses:gpt-5.4-mini` (OpenAI Responses API — enables
+    native web search), `openai-chat:gpt-5.4-mini`,
+    `fireworks:accounts/fireworks/models/kimi-k2.6`, `groq:llama-3.3-70b`.
+    """
+
+    writer: str = "openai-responses:gpt-5.4-mini"
+    researcher: str = "openai-responses:gpt-5.4-mini"
+    refiner: str = "openai-responses:gpt-5.4-mini"
+    setup: str = "openai-responses:gpt-5.4-mini"
+    # Embeddings stay on OpenAI (pydantic-ai does not cover embeddings). May be a
+    # bare model name or an `openai:`-prefixed string.
+    embedding: str = "text-embedding-3-small"
+    # Apply OpenAI's "flex" service tier to `openai-responses:` models.
+    openai_flex: bool = False
 
 
 class ResearcherConfig(BaseModel):
@@ -45,13 +67,6 @@ class DedupConfig(BaseModel):
     candidate_log_path: str = "data/dedup_candidates.jsonl"
 
 
-class CostControlConfig(BaseModel):
-    global_daily_usd: float = 1.50
-    per_channel_default_daily_usd: float = 0.50
-    on_threshold: str = "pause"  # warn | downgrade | pause
-    downgrade_to: str = "gpt-5.4-mini"
-
-
 class StorageConfig(BaseModel):
     db_path: str = "data/news-bot.sqlite"
 
@@ -67,13 +82,30 @@ class LoggingConfig(BaseModel):
 
 class AppConfig(BaseModel):
     telegram: TelegramConfig
-    openai: OpenAIConfig
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
     researcher: ResearcherConfig = Field(default_factory=ResearcherConfig)
     dedup: DedupConfig = Field(default_factory=DedupConfig)
-    cost_control: CostControlConfig = Field(default_factory=CostControlConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    def model_for(self, role: str) -> str:
+        """Return the configured `provider:model` string for a role.
+
+        `role` is one of: writer, researcher, refiner, setup.
+        """
+        return getattr(self.models, role)
+
+    def openai_api_key(self) -> str:
+        """API key for the `openai` provider, used for embeddings."""
+        p = self.providers.get("openai")
+        return p.api_key if p else ""
+
+    def embedding_model(self) -> str:
+        """Bare embedding model name (strips any `provider:` prefix)."""
+        m = self.models.embedding
+        return m.split(":", 1)[1] if ":" in m else m
 
 
 def load_config(path: str | Path) -> AppConfig:

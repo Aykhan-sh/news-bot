@@ -16,11 +16,10 @@ from agents.setup_agent import (
     render_system_prompt,
     setup_agent,
 )
-from llm.cost import estimate_cost, usage_from_result
 from llm.models import ModelFactory
 from orchestrator.models import AppConfig
 from orchestrator.orchestrator import _html_escape, md_to_html
-from storage.repositories import ChannelRepo, UsageRepo
+from storage.repositories import ChannelRepo
 from telegram_client.client import InlineButton, TelegramBotClient
 
 log = logging.getLogger(__name__)
@@ -50,7 +49,6 @@ class OnboardingFlow:
         tg: TelegramBotClient,
         models: ModelFactory,
         channels: ChannelRepo,
-        usage: UsageRepo,
         channels_dir: Path,
         on_channel_saved: Callable[[str], Awaitable[None]],
     ) -> None:
@@ -58,7 +56,6 @@ class OnboardingFlow:
         self.tg = tg
         self.models = models
         self.channels = channels
-        self.usage = usage
         self.channels_dir = channels_dir
         self.on_channel_saved = on_channel_saved
         self.state = OnboardingState()
@@ -219,8 +216,7 @@ class OnboardingFlow:
             render_system_prompt(deps), self.state.history[:-1]
         )
 
-        model_id = self.cfg.openai.default_setup_model
-        model = self.models.get(model_id)
+        model = self.models.get(self.cfg.model_for("setup"))
         try:
             result = await setup_agent.run(
                 user_prompt=user_text,
@@ -233,16 +229,6 @@ class OnboardingFlow:
             await self.tg.send_message(f"Setup failed: <code>{_html_escape(str(e))}</code>")
             self.state.awaiting_reply = True
             return
-
-        tin, tout = usage_from_result(result)
-        await self.usage.insert(
-            None,
-            "setup_agent",
-            model_id,
-            tin,
-            tout,
-            estimate_cost(model_id, tin, tout),
-        )
 
         out: SetupAgentOutput = result.output
         self.state.history.append({"role": "assistant", "text": out.assistant_message})
@@ -307,12 +293,12 @@ class OnboardingFlow:
             "mode": p.mode,
             "topic_prompt": p.topic_prompt,
             "schedule": {"kind": p.schedule.kind, "spec": p.schedule.spec},
-            "model_writer": self.cfg.openai.default_writer_model,
+            "model_writer": self.cfg.model_for("writer"),
         }
         if p.format and p.format.strip():
             spec["format"] = p.format.strip()
         if p.mode == "sourced":
-            spec["model_researcher"] = self.cfg.openai.default_researcher_model
+            spec["model_researcher"] = self.cfg.model_for("researcher")
             spec["search"] = {"freshness_days": p.freshness_days}
             if p.research_prompt and p.research_prompt.strip():
                 spec["research_prompt"] = p.research_prompt.strip()
