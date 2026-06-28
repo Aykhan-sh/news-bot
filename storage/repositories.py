@@ -21,6 +21,7 @@ class ChannelRow:
     display_name: str
     hashtag: str
     mode: str
+    research_depth: str
     model_writer: str
     model_researcher: Optional[str]
     topic_prompt_active: str
@@ -41,6 +42,11 @@ class ChannelRow:
             display_name=row["display_name"],
             hashtag=row["hashtag"],
             mode=row["mode"],
+            research_depth=(
+                row["research_depth"]
+                if "research_depth" in row.keys()
+                else "single"
+            ),
             model_writer=row["model_writer"],
             model_researcher=row["model_researcher"],
             topic_prompt_active=row["topic_prompt_active"],
@@ -106,16 +112,17 @@ class ChannelRepo:
             await self.db.execute(
                 """
                 INSERT INTO channels (
-                    id, display_name, hashtag, mode, model_writer, model_researcher,
+                    id, display_name, hashtag, mode, research_depth, model_writer, model_researcher,
                     topic_prompt_active, research_prompt, "format", schedule_kind, schedule_spec,
                     dedup_window_n, search_freshness_days, search_topic, images_enabled, enabled
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     spec["id"],
                     spec["display_name"],
                     spec["hashtag"],
                     spec["mode"],
+                    spec.get("research_depth", "single"),
                     spec["model_writer"],
                     spec.get("model_researcher"),
                     spec["topic_prompt"],
@@ -134,7 +141,7 @@ class ChannelRepo:
             await self.db.execute(
                 """
                 UPDATE channels
-                SET display_name=?, hashtag=?, mode=?, model_writer=?, model_researcher=?,
+                SET display_name=?, hashtag=?, mode=?, research_depth=?, model_writer=?, model_researcher=?,
                     "format"=?, schedule_kind=?, schedule_spec=?, dedup_window_n=?,
                     search_freshness_days=?, search_topic=?, images_enabled=?,
                     updated_at=CURRENT_TIMESTAMP
@@ -144,6 +151,7 @@ class ChannelRepo:
                     spec["display_name"],
                     spec["hashtag"],
                     spec["mode"],
+                    spec.get("research_depth", "single"),
                     spec["model_writer"],
                     spec.get("model_researcher"),
                     spec.get("format"),
@@ -183,6 +191,13 @@ class ChannelRepo:
         await self.db.execute(
             "UPDATE channels SET research_prompt=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (new_prompt, channel_id),
+        )
+
+    async def set_research_depth(self, channel_id: str, depth: str) -> None:
+        """Set the channel's research depth ('single' = one source, 'deep' = anchor + supporting sources)."""
+        await self.db.execute(
+            "UPDATE channels SET research_depth=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (depth, channel_id),
         )
 
     async def set_freshness_days(self, channel_id: str, days: Optional[int]) -> None:

@@ -17,6 +17,8 @@ SCHEMA_STATEMENTS: list[str] = [
         display_name                TEXT NOT NULL,
         hashtag                     TEXT NOT NULL,
         mode                        TEXT NOT NULL CHECK (mode IN ('sourced', 'llm_only')),
+        research_depth              TEXT NOT NULL DEFAULT 'single'
+                                     CHECK (research_depth IN ('single', 'deep')),
         model_writer                TEXT NOT NULL,
         model_researcher            TEXT,
         topic_prompt_active         TEXT NOT NULL,
@@ -193,6 +195,7 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("pending_prompt_updates", "proposed_schedule_spec", "proposed_schedule_spec TEXT"),
     ("pending_prompt_updates", "proposed_format", "proposed_format TEXT"),
     ("channels", "research_prompt", "research_prompt TEXT"),
+    ("channels", "research_depth", "research_depth TEXT NOT NULL DEFAULT 'single'"),
     ("pending_prompt_updates", "proposed_research_prompt", "proposed_research_prompt TEXT"),
 ]
 

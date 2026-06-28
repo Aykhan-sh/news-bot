@@ -52,6 +52,10 @@ class ResearcherConfig(BaseModel):
     # the researcher fetch a batch, check it, and — if everything collides — refine
     # its queries and try again, without looping forever.
     per_tick_check_budget: int = 3
+    # Deep-research mode only: the most supporting sources the researcher may attach
+    # to the anchor story (beyond the anchor itself) before handing them to the
+    # writer. The agent is free to pick fewer. Ignored for `single` channels.
+    deep_max_sources: int = 4
     # Sampling temperature for the researcher's model. Higher values diversify the
     # search queries across ticks so repeated firings don't keep colliding on the
     # same stories. Leave null to use the provider default. NOTE: OpenAI reasoning

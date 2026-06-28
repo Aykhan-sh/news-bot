@@ -123,14 +123,17 @@ class Orchestrator:
 
         research_note: Optional[dict] = None
         research_vector: Optional[list[float]] = None
+        supporting_notes: list[dict] = []
         if channel.mode == "sourced":
             researcher_result = await self._run_researcher(channel, window, researcher_model)
             if researcher_result is None:
                 await self._send_nothing_new(channel)
                 return
-            research_note, research_vector = researcher_result
+            research_note, research_vector, supporting_notes = researcher_result
 
-        await self._run_writer_and_send(channel, window, research_note, research_vector, writer_model)
+        await self._run_writer_and_send(
+            channel, window, research_note, research_vector, supporting_notes, writer_model
+        )
 
     # ------------------------------------------------------------------
     # Researcher path
@@ -141,7 +144,7 @@ class Orchestrator:
         channel: ChannelRow,
         window,
         researcher_model: str,
-    ) -> Optional[tuple[dict, Optional[list[float]]]]:
+    ) -> Optional[tuple[dict, Optional[list[float]], list[dict]]]:
         deps = ResearcherDeps(
             channel=channel,
             messages=self.messages,
@@ -149,6 +152,7 @@ class Orchestrator:
             window=window,
             fetch_budget=self.cfg.researcher.per_tick_fetch_budget,
             check_budget=self.cfg.researcher.per_tick_check_budget,
+            deep_max_sources=self.cfg.researcher.deep_max_sources,
         )
         model = self.models.get(researcher_model)
         # OpenAI uses the native WebSearchTool; providers without it (Fireworks/GLM)
@@ -187,30 +191,60 @@ class Orchestrator:
             return None
 
         out: ResearcherOutput = result.output
-        if out.picked_id is None:
+        # Deep mode commits the anchor mid-trajectory via the `choose_anchor` tool,
+        # which is authoritative; the final output's `picked_id` is the single-mode
+        # path and the deep-mode fallback if the tool was never called.
+        picked_id = deps.anchor_id or out.picked_id
+        if picked_id is None:
             log.info("Researcher returned nothing for %s", channel.id)
             return None
 
         # The pick is the id of a source the researcher fetched this tick. The full
         # record (url, title, published_at, text) is the writer's research note.
         # We trust check_relevance for freshness/dedup — no extra post-pick gate.
-        candidate = deps.fetched.get(out.picked_id)
+        candidate = deps.fetched.get(picked_id)
         if candidate is None:
             log.warning(
                 "Researcher picked id %s for %s but it was never fetched (have: %s); skipping",
-                out.picked_id,
+                picked_id,
                 channel.id,
                 list(deps.fetched.keys()),
             )
             return None
+        # Deep-research mode: attach the supporting sources the researcher gathered
+        # around the anchor. `gather_supporting_sources` already freshness-checked and
+        # capped them into deps.supporting_ids (authoritative); fall back to the output
+        # field only if the tool was never called. Single-source channels: empty.
+        supporting_ids = deps.supporting_ids or out.supporting_ids
+        supporting_notes: list[dict] = []
+        if supporting_ids:
+            seen_ids = {picked_id}
+            for sid in supporting_ids:
+                if sid in seen_ids:
+                    continue
+                seen_ids.add(sid)
+                support = deps.fetched.get(sid)
+                if support is None:
+                    log.warning(
+                        "Researcher listed supporting id %s for %s but it was never "
+                        "fetched (have: %s); skipping",
+                        sid,
+                        channel.id,
+                        list(deps.fetched.keys()),
+                    )
+                    continue
+                supporting_notes.append(support.to_dict())
+                if len(supporting_notes) >= deps.deep_max_sources:
+                    break
         log.info(
-            "Researcher picked %s (%s) for %s",
-            out.picked_id,
+            "Researcher picked %s (%s) for %s with %d supporting source(s)",
+            picked_id,
             out.picked_title or "?",
             channel.id,
+            len(supporting_notes),
         )
-        picked_vector = deps.fetched_vectors.get(out.picked_id)
-        return candidate.to_dict(), picked_vector
+        picked_vector = deps.fetched_vectors.get(picked_id)
+        return candidate.to_dict(), picked_vector, supporting_notes
 
     async def _send_nothing_new(self, channel: ChannelRow) -> None:
         text = f"{_html_escape(channel.hashtag)}\n\n<i>Nothing new today.</i>"
@@ -226,12 +260,14 @@ class Orchestrator:
         window,
         research_note: Optional[dict],
         research_vector: Optional[list[float]],
+        supporting_notes: list[dict],
         writer_model: str,
     ) -> None:
         deps = WriterDeps(
             channel=channel,
             window=window,
             research_note=research_note,
+            supporting_notes=supporting_notes,
             fetch_budget=self.cfg.researcher.per_tick_fetch_budget,
         )
         model = self.models.get(writer_model)

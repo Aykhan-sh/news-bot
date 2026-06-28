@@ -136,6 +136,28 @@ Source text (already-fetched excerpt — base your post on this):
 If this excerpt is too thin or cut off to write an accurate post, call the
 `fetch_url` tool with the url above to pull a wider excerpt. Never invent facts,
 numbers, or dates that aren't supported by the source.
+
+{% if supporting_notes -%}
+## Supporting sources (deep research)
+
+The Researcher also gathered these additional sources covering the **same story**
+from other outlets/angles. Use them to corroborate facts, add detail, numbers, or
+context the anchor lacks — but the post is still about the anchor story above, not
+a different one. Synthesise across all of them; do not just summarise each in turn.
+List every URL you actually relied on (the anchor plus any of these) in
+`sources_used`. Never invent facts not supported by these sources.
+
+{% for s in supporting_notes %}
+### Source {{ loop.index }}{% if s.title %} — {{ s.title }}{% endif %}
+- url: {{ s.url }}
+- published_at: {{ s.published_at or "unknown" }}
+
+Excerpt:
+---
+{{ s.text or "(empty — call fetch_url on the url above if you need this source)" }}
+---
+{% endfor %}
+{%- endif %}
 {%- endif %}
 
 {% include "shared/do_not_repeat.j2" %}

@@ -44,6 +44,16 @@ class ResearcherOutput(BaseModel):
             "is easy to verify. Null when `picked_id` is null."
         ),
     )
+    supporting_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "DEEP-RESEARCH channels only, and normally left empty. Supporting sources "
+            "are committed by calling the `gather_supporting_sources` tool, not via "
+            "this field — the tool's accepted set is what reaches the writer. Only "
+            "list ids here as a fallback if you could not call that tool; each must be "
+            "a source you fetched this tick. Never include the anchor id."
+        ),
+    )
 
 
 async def _system_prompt(ctx: RunContext[ResearcherDeps]) -> str:
@@ -52,6 +62,8 @@ async def _system_prompt(ctx: RunContext[ResearcherDeps]) -> str:
         channel=ctx.deps.channel,
         fetch_budget=ctx.deps.fetch_budget,
         check_budget=ctx.deps.check_budget,
+        research_depth=ctx.deps.channel.research_depth,
+        deep_max_sources=ctx.deps.deep_max_sources,
         today=datetime.now(timezone.utc).date().isoformat(),
         freshness_days=ctx.deps.channel.search_freshness_days or DEFAULT_RELEVANCE_DAYS,
     )
@@ -265,6 +277,159 @@ async def check_relevance(
     }
 
 
+async def choose_anchor(
+    ctx: RunContext[ResearcherDeps],
+    source_id: str,
+) -> dict:
+    """DEEP-RESEARCH only: commit the anchor story BEFORE searching for supporting sources.
+
+    This is a required gate in deep mode. Once `check_relevance` has confirmed a
+    relevant, non-duplicate candidate, call `choose_anchor` with that candidate's
+    id to lock it in as the anchor — the single story this post is about. You MUST
+    do this before you start hunting for supporting sources; `gather_supporting_sources`
+    refuses to run until an anchor is committed.
+
+    The `source_id` MUST be a candidate you fetched this tick that came back
+    `is_relevant` from `check_relevance` (fresh AND not a duplicate). Pick the
+    highest-significance relevant candidate. You can only commit one anchor; calling
+    this again replaces the previous choice.
+
+    Args:
+        source_id: the id (e.g. 's1') of the relevant candidate to anchor on.
+    """
+    if ctx.deps.channel.research_depth != "deep":
+        return {
+            "error": (
+                "choose_anchor is only available on deep-research channels. This "
+                "channel is single-source: return the chosen source as picked_id."
+            )
+        }
+    cand = ctx.deps.fetched.get(source_id)
+    if cand is None:
+        return {
+            "error": f"{source_id} was never fetched this tick.",
+            "fetched_ids": list(ctx.deps.fetched.keys()),
+        }
+    if not cand.was_checked:
+        return {
+            "error": (
+                f"{source_id} has not been through check_relevance yet. Run "
+                "check_relevance first, then anchor on a relevant candidate."
+            )
+        }
+    if not cand.is_relevant:
+        return {
+            "error": (
+                f"{source_id} did not pass check_relevance (stale or duplicate) and "
+                "cannot be the anchor. Choose a candidate that came back is_relevant."
+            )
+        }
+    ctx.deps.anchor_id = source_id
+    return {
+        "anchor_id": source_id,
+        "title": cand.title or "",
+        "message": (
+            "Anchor committed. Now search for supporting sources covering THIS same "
+            "story (other outlets, the primary announcement, supporting data), fetch "
+            "them, then call gather_supporting_sources with their ids."
+        ),
+    }
+
+
+async def gather_supporting_sources(
+    ctx: RunContext[ResearcherDeps],
+    source_ids: list[str],
+    freshness_days: Optional[int] = None,
+) -> dict:
+    """DEEP-RESEARCH only: commit the supporting sources that back the anchor.
+
+    Call this AFTER `choose_anchor` and after you have fetched the extra sources you
+    want to use. Pass `source_ids` — the list of fetched-source ids you decided to
+    attach to the anchor. Each is freshness-checked (publish date within the window);
+    fresh ids are accepted and handed to the writer. It does NOT run duplicate/
+    collision detection — supporting sources corroborate the anchor, so overlap
+    between them is fine. Only the anchor must be non-duplicate.
+
+    The anchor id is rejected if you include it, ids you never fetched are rejected,
+    and the accepted set is capped at `deep_max_sources`. Returns the accepted and
+    rejected ids (with reasons). Available only on deep-research channels.
+
+    Args:
+        source_ids: ids (e.g. ['s2', 's4']) of the fetched supporting sources to use.
+        freshness_days: optional tighter window; falls back to the channel default.
+    """
+    if ctx.deps.channel.research_depth != "deep":
+        return {
+            "error": (
+                "gather_supporting_sources is only available on deep-research "
+                "channels. This channel is single-source: return the chosen source "
+                "as picked_id."
+            )
+        }
+    if ctx.deps.anchor_id is None:
+        return {
+            "error": (
+                "No anchor committed yet. Call choose_anchor with your relevant "
+                "anchor candidate before gathering supporting sources."
+            )
+        }
+
+    window_days = (
+        freshness_days
+        if freshness_days is not None
+        else (ctx.deps.channel.search_freshness_days or DEFAULT_RELEVANCE_DAYS)
+    )
+    now = datetime.now(timezone.utc)
+
+    accepted: list[dict] = []
+    rejected: list[dict] = []
+    seen: set[str] = set()
+    for sid in source_ids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        if sid == ctx.deps.anchor_id:
+            rejected.append({"id": sid, "reason": "is_anchor"})
+            continue
+        cand = ctx.deps.fetched.get(sid)
+        if cand is None:
+            rejected.append({"id": sid, "reason": "not_fetched"})
+            continue
+        date_info = _date_verdict(cand.published_at, window_days, now)
+        cand.fresh_checked = True
+        cand.is_fresh = bool(date_info["within_window"])
+        if not cand.is_fresh:
+            rejected.append({"id": sid, "reason": date_info["date_verdict"]})
+            continue
+        if len(accepted) >= ctx.deps.deep_max_sources:
+            rejected.append({"id": sid, "reason": "over_deep_max_sources"})
+            continue
+        accepted.append({"id": sid, "url": cand.url, "title": cand.title or ""})
+
+    ctx.deps.supporting_ids = [a["id"] for a in accepted]
+
+    if accepted:
+        label = ", ".join(f"{a['id']} — {a['title']}" for a in accepted)
+        message = (
+            f"{len(accepted)} supporting source(s) committed: {label}. "
+            "Finish by returning the anchor as picked_id."
+        )
+    else:
+        message = (
+            "No supporting sources committed (none were fresh/fetched). The post "
+            "will be written from the anchor alone — return it as picked_id."
+        )
+
+    return {
+        "freshness_days": window_days,
+        "anchor_id": ctx.deps.anchor_id,
+        "accepted": accepted,
+        "rejected": rejected,
+        "deep_max_sources": ctx.deps.deep_max_sources,
+        "message": message,
+    }
+
+
 def build_researcher_agent(
     *, native_search: bool
 ) -> Agent[ResearcherDeps, ResearcherOutput]:
@@ -294,6 +459,11 @@ def build_researcher_agent(
         agent.tool(web_search)
     agent.tool(fetch_url)
     agent.tool(check_relevance)
+    # Deep-research channels commit an anchor (choose_anchor) and then attach
+    # supporting sources (gather_supporting_sources). Both no-op (return an error)
+    # on single-source channels, so they are safe to register on both variants.
+    agent.tool(choose_anchor)
+    agent.tool(gather_supporting_sources)
     return agent
 
 

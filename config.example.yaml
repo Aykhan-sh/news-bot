@@ -35,6 +35,7 @@ models:
 researcher:
   per_tick_fetch_budget: 8 # hard cap on fetch_url calls per channel tick
   per_tick_check_budget: 3 # hard cap on check_relevance (collision-check) rounds per tick
+  deep_max_sources: 4 # deep-research channels only: max supporting sources attached to the anchor story
   temperature: null # researcher sampling temperature; raise (e.g. 0.8) to diversify
   # queries across ticks. NOTE: leave null for OpenAI reasoning models (gpt-5.x with
   # reasoning on) — they reject a non-default temperature.

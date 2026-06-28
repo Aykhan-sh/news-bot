@@ -42,6 +42,7 @@ async def _system_prompt(ctx: RunContext[WriterDeps]) -> str:
             for m in ctx.deps.window
         ],
         research_note=ctx.deps.research_note,
+        supporting_notes=ctx.deps.supporting_notes,
     )
 
 

@@ -19,6 +19,11 @@ class Candidate:
     byline: Optional[str] = None
     was_checked: bool = False
     is_relevant: bool = False
+    # Deep mode: set by `gather_supporting_sources` (freshness-only gate). A fresh
+    # candidate is eligible as a supporting source even if it duplicates another
+    # supporting source — only the anchor must pass the full `check_relevance` gate.
+    fresh_checked: bool = False
+    is_fresh: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +46,9 @@ class ResearcherDeps:
     fetch_budget: int
     # Hard cap on `check_relevance` calls this tick (collision-check rounds).
     check_budget: int = 3
+    # Deep mode only: most supporting sources (beyond the anchor) the researcher may
+    # attach to the writer's note. Mirrors `ResearcherConfig.deep_max_sources`.
+    deep_max_sources: int = 4
     # per-run mutable state (tracked by tools)
     fetch_calls_made: int = 0
     check_calls_made: int = 0
@@ -52,6 +60,14 @@ class ResearcherDeps:
     # source id (e.g. "s1"). The orchestrator reuses the picked candidate's vector
     # when saving the post embedding instead of re-embedding the writer's output.
     fetched_vectors: dict[str, list[float]] = field(default_factory=dict)
+    # Deep mode: the anchor source the researcher committed to via the `choose_anchor`
+    # tool, before it searched for supporting sources. The orchestrator treats this as
+    # authoritative (falling back to the final output's `picked_id` only if unset).
+    anchor_id: Optional[str] = None
+    # Deep mode: supporting source ids accepted by `gather_supporting_sources` (fetched
+    # this tick and fresh). The orchestrator hands these to the writer alongside the
+    # anchor. Falls back to the final output's `supporting_ids` only if unset.
+    supporting_ids: list[str] = field(default_factory=list)
     # Web-search backend used by the fallback `web_search` tool when the researcher
     # runs on a provider without native web search (e.g. Fireworks). Ignored when
     # the researcher uses OpenAI's native `WebSearchTool`.
@@ -63,6 +79,10 @@ class WriterDeps:
     channel: ChannelRow
     window: list  # list[MessageRow]
     research_note: Optional[dict]  # fetched source record {id,url,title,published_at,text}
+    # Deep mode: extra fetched source records ({id,url,title,published_at,text}) that
+    # back the anchor `research_note`. The writer synthesises all of them into one
+    # post and cites the URLs it relied on. Empty for single-source channels.
+    supporting_notes: list[dict] = field(default_factory=list)
     # Budget for the writer's own fetch_url tool, used to re-open the chosen
     # source with a wider char limit when the researcher's excerpt is too thin.
     fetch_budget: int = 0
