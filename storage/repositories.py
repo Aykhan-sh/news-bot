@@ -314,6 +314,26 @@ class MessageRepo:
         )
         return [MessageRow.from_row(r) for r in rows]
 
+    async def recent_window_months(
+        self, channel_id: str, months: int, limit: int = 500
+    ) -> list[MessageRow]:
+        """Posts for a channel within the last `months` months, newest first.
+
+        Wider than `recent_window` (which is count-based): used to surface a longer
+        "already covered" history to the writer/researcher so they don't repeat a
+        topic we posted weeks or months ago.
+        """
+        rows = await self.db.fetchall(
+            """
+            SELECT * FROM messages_sent
+            WHERE channel_id=? AND created_at >= datetime('now', ?)
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (channel_id, f"-{int(months)} months", limit),
+        )
+        return [MessageRow.from_row(r) for r in rows]
+
     async def save_embedding(
         self,
         message_id: int,

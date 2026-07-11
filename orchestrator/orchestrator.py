@@ -27,10 +27,40 @@ from storage.repositories import (
     ChannelRepo,
     ChannelRow,
     MessageRepo,
+    MessageRow,
 )
 from telegram_client.client import InlineButton, TelegramBotClient
 
 log = logging.getLogger(__name__)
+
+# Max write→collision-check rounds for unsourced (llm_only) channels before we
+# give up and tell the channel we couldn't find a unique post.
+_UNSOURCED_DEDUP_MAX_ATTEMPTS = 3
+
+# Do-not-repeat window: how far back we surface already-covered topics to the
+# researcher/writer, and the max total length (chars) of those topic titles in the
+# prompt. Topics beyond the char budget are dropped so the prompt can't balloon.
+_COVERED_TOPICS_MONTHS = 3
+_COVERED_TOPICS_MAX_CHARS = 2000
+
+
+def _cap_covered_window(rows: list[MessageRow], max_chars: int) -> list[MessageRow]:
+    """Trim the do-not-repeat window so the covered-topic titles fit a char budget.
+
+    Rows arrive newest-first. We keep a running total of the topic titles' length
+    and include a post only while that total stays within `max_chars`, dropping any
+    topic that would push it over. This lets the window reach back months without
+    letting the rendered "already covered" list blow up the prompt.
+    """
+    kept: list[MessageRow] = []
+    used = 0
+    for row in rows:
+        cost = len(row.title or "")
+        if used + cost > max_chars:
+            continue
+        used += cost
+        kept.append(row)
+    return kept
 
 
 def _tick_span(name: str, **attrs):
@@ -144,7 +174,10 @@ class Orchestrator:
             writer_model = self.cfg.model_for("writer")
             researcher_model = self.cfg.model_for("researcher")
 
-            window = await self.dedup.sliding_window(channel.id, channel.dedup_window_n)
+            window = _cap_covered_window(
+                await self.messages.recent_window_months(channel.id, _COVERED_TOPICS_MONTHS),
+                _COVERED_TOPICS_MAX_CHARS,
+            )
 
             research_note: Optional[dict] = None
             research_vector: Optional[list[float]] = None
@@ -275,6 +308,78 @@ class Orchestrator:
         text = f"{_html_escape(channel.hashtag)}\n\n<i>Nothing new today.</i>"
         await self.tg.send_message(text)
 
+    async def _send_no_unique_post(self, channel: ChannelRow) -> None:
+        text = (
+            f"{_html_escape(channel.hashtag)}\n\n"
+            "<i>Could not find a unique post today.</i>"
+        )
+        await self.tg.send_message(text)
+
+    async def _write_unique_draft(
+        self,
+        channel: ChannelRow,
+        deps: WriterDeps,
+        model,
+    ) -> Optional[WriterOutput]:
+        """Write a post for an unsourced channel, re-writing on collision.
+
+        The researcher (and its embedding collision gate) never runs for llm_only
+        channels, so we run the same gate here via ``DedupEngine.check`` — it embeds
+        the draft and compares it against the channel's recent embeddings. On a
+        collision we tell the writer what it duplicated and ask for a genuinely
+        different post, up to ``_UNSOURCED_DEDUP_MAX_ATTEMPTS`` times.
+
+        Returns the first unique draft, or ``None`` if every attempt collided (or
+        the writer errored).
+        """
+        avoid: list[str] = []
+        for attempt in range(1, _UNSOURCED_DEDUP_MAX_ATTEMPTS + 1):
+            user_prompt = "Write the next post for this channel."
+            if avoid:
+                already = "\n".join(f"- {t}" for t in avoid)
+                user_prompt = (
+                    "Write the next post for this channel. Your previous attempt was "
+                    "too similar to a post we have ALREADY published. Pick a genuinely "
+                    "different word/topic — different angle, different example. Do NOT "
+                    "write about any of these already-covered items:\n" + already
+                )
+            try:
+                result = await writer_agent.run(
+                    user_prompt=user_prompt, deps=deps, model=model
+                )
+            except Exception as e:
+                log.exception("Writer failed for %s: %s", channel.id, e)
+                return None
+            draft = result.output
+
+            report = await self.dedup.check(
+                channel.id,
+                title=draft.title,
+                keywords=draft.keywords,
+                body=draft.body,
+            )
+            if not report.has_collision:
+                if attempt > 1:
+                    log.info(
+                        "Writer found a unique post for %s on attempt %d/%d",
+                        channel.id, attempt, _UNSOURCED_DEDUP_MAX_ATTEMPTS,
+                    )
+                return draft
+
+            log.info(
+                "Writer draft for %s collided (attempt %d/%d): %s",
+                channel.id, attempt, _UNSOURCED_DEDUP_MAX_ATTEMPTS, report.summary(),
+            )
+            for hit in report.hits:
+                if hit.title not in avoid:
+                    avoid.append(hit.title)
+
+        log.warning(
+            "Writer could not produce a unique post for %s after %d attempts",
+            channel.id, _UNSOURCED_DEDUP_MAX_ATTEMPTS,
+        )
+        return None
+
     # ------------------------------------------------------------------
     # Writer path + dedup retry
     # ------------------------------------------------------------------
@@ -297,17 +402,26 @@ class Orchestrator:
         )
         model = self.models.get(writer_model)
 
-        # Dedup is the researcher's job (it picks a non-colliding source from a
-        # whole shortlist). The writer only has the one chosen source, so re-checking
-        # here can only fail — it just writes the post.
-        try:
-            result = await writer_agent.run(
-                user_prompt="Write the next post for this channel.", deps=deps, model=model
-            )
-        except Exception as e:
-            log.exception("Writer failed for %s: %s", channel.id, e)
-            return
-        draft = result.output
+        # Unsourced (llm_only) channels never run the researcher, so their drafts
+        # were never collision-checked. Write and re-write on collision up to a few
+        # attempts; give up (and say so) if we can't find a unique post.
+        if channel.mode == "llm_only":
+            draft = await self._write_unique_draft(channel, deps, model)
+            if draft is None:
+                await self._send_no_unique_post(channel)
+                return
+        else:
+            # Dedup is the researcher's job (it picks a non-colliding source from a
+            # whole shortlist). The writer only has the one chosen source, so re-checking
+            # here can only fail — it just writes the post.
+            try:
+                result = await writer_agent.run(
+                    user_prompt="Write the next post for this channel.", deps=deps, model=model
+                )
+            except Exception as e:
+                log.exception("Writer failed for %s: %s", channel.id, e)
+                return
+            draft = result.output
 
         body_text = self._format_telegram_body(channel, draft)
         buttons = self._buttons_for_draft(channel, draft)
