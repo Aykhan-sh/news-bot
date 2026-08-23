@@ -23,6 +23,7 @@ from llm.models import ModelFactory
 from orchestrator.dedup import DedupEngine, build_embed_text
 from orchestrator.models import AppConfig
 from orchestrator.prompt_builder import render
+from orchestrator.word_bank import sample_words
 from storage.repositories import (
     ChannelRepo,
     ChannelRow,
@@ -36,6 +37,11 @@ log = logging.getLogger(__name__)
 # Max write→collision-check rounds for unsourced (llm_only) channels before we
 # give up and tell the channel we couldn't find a unique post.
 _UNSOURCED_DEDUP_MAX_ATTEMPTS = 3
+
+# llm_only channel id that gets a random 20-word sample from the GRE word bank
+# each tick instead of the generic "write the next post" prompt.
+_GRE_VOCAB_CHANNEL_ID = "gre_vocab"
+_GRE_WORDS_PER_TICK = 20
 
 # Do-not-repeat window: how far back we surface already-covered topics to the
 # researcher/writer, and the max total length (chars) of those topic titles in the
@@ -320,6 +326,7 @@ class Orchestrator:
         channel: ChannelRow,
         deps: WriterDeps,
         model,
+        base_user_prompt: str = "Write the next post for this channel.",
     ) -> Optional[WriterOutput]:
         """Write a post for an unsourced channel, re-writing on collision.
 
@@ -334,14 +341,14 @@ class Orchestrator:
         """
         avoid: list[str] = []
         for attempt in range(1, _UNSOURCED_DEDUP_MAX_ATTEMPTS + 1):
-            user_prompt = "Write the next post for this channel."
+            user_prompt = base_user_prompt
             if avoid:
                 already = "\n".join(f"- {t}" for t in avoid)
                 user_prompt = (
-                    "Write the next post for this channel. Your previous attempt was "
-                    "too similar to a post we have ALREADY published. Pick a genuinely "
-                    "different word/topic — different angle, different example. Do NOT "
-                    "write about any of these already-covered items:\n" + already
+                    f"{base_user_prompt}\n\nYour previous attempt was too similar to a "
+                    "post we have ALREADY published. Pick a genuinely different word/"
+                    "topic — different angle, different example. Do NOT write about "
+                    "any of these already-covered items:\n" + already
                 )
             try:
                 result = await writer_agent.run(
@@ -406,7 +413,19 @@ class Orchestrator:
         # were never collision-checked. Write and re-write on collision up to a few
         # attempts; give up (and say so) if we can't find a unique post.
         if channel.mode == "llm_only":
-            draft = await self._write_unique_draft(channel, deps, model)
+            base_user_prompt = "Write the next post for this channel."
+            if channel.id == _GRE_VOCAB_CHANNEL_ID:
+                deps.words = sample_words(_GRE_WORDS_PER_TICK)
+                word_lines = "\n".join(
+                    f"{w['word']}: {w['definition']}" for w in deps.words
+                )
+                base_user_prompt = (
+                    f"Here are {len(deps.words)} words:\n{word_lines}\n\n"
+                    "Generate me text."
+                )
+            draft = await self._write_unique_draft(
+                channel, deps, model, base_user_prompt
+            )
             if draft is None:
                 await self._send_no_unique_post(channel)
                 return

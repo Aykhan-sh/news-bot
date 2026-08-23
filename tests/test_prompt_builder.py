@@ -24,10 +24,27 @@ def test_writer_system_prompt_renders():
         channel=_ch(),
         window=[{"title": "Alpha", "keywords": "a b"}],
         research_note=None,
+        words=[],
     )
     assert "Channel: **Test**" in text
     assert "Alpha" in text
     assert "one bold word, then meaning" in text
+
+
+def test_writer_system_prompt_includes_words_block_when_present():
+    text = render(
+        "writer.system.j2",
+        channel=_ch(),
+        window=[],
+        research_note=None,
+        words=[{"word": "demur", "definition": "verb: to object or show reluctance"}],
+    )
+    assert "Vocabulary words for this post" in text
+    assert "at least 4" in text
+    assert "150" in text and "250" in text
+    # the sampled words themselves stay out of the system prompt — they belong
+    # in the user message, not here
+    assert "demur" not in text
 
 
 def test_researcher_prompt_renders():
@@ -105,6 +122,7 @@ def test_writer_renders_supporting_notes():
         window=[],
         research_note=note,
         supporting_notes=supporting,
+        words=[],
     )
     assert "Supporting sources" in text
     assert "https://b.example/more" in text
@@ -120,6 +138,7 @@ def test_writer_does_not_get_research_prompt():
         channel=ch,
         window=[],
         research_note=None,
+        words=[],
     )
     assert "watch the official OpenAI and Anthropic blogs" not in text
     assert "topic here" in text  # writer still sees the topic prompt

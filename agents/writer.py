@@ -43,6 +43,7 @@ async def _system_prompt(ctx: RunContext[WriterDeps]) -> str:
         ],
         research_note=ctx.deps.research_note,
         supporting_notes=ctx.deps.supporting_notes,
+        words=ctx.deps.words,
     )
 
 

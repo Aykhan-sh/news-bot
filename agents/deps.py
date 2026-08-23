@@ -87,6 +87,9 @@ class WriterDeps:
     # source with a wider char limit when the researcher's excerpt is too thin.
     fetch_budget: int = 0
     fetch_calls_made: int = 0
+    # GRE-vocabulary channels only: the sampled {word, definition} pairs offered
+    # to the writer this tick. Empty for every other channel.
+    words: list[dict] = field(default_factory=list)
 
 
 @dataclass
