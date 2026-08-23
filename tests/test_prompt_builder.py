@@ -42,6 +42,7 @@ def test_writer_system_prompt_includes_words_block_when_present():
     assert "Vocabulary words for this post" in text
     assert "at least 4" in text
     assert "150" in text and "250" in text
+    assert "italic" in text.lower()
     # the sampled words themselves stay out of the system prompt — they belong
     # in the user message, not here
     assert "demur" not in text
